@@ -126,14 +126,15 @@ This is a research project and learning exercise. It is not production-ready.
  
 ## Dependencies
  
-| Dependency    | Version | Purpose                        |
-|---------------|---------|--------------------------------|
-| stdexec       | main    | P2300 reference implementation |
-| Boost.Fiber   | 1.84+   | Fiber runtime + work stealing  |
-| Boost.Context | 1.84+   | Low-level context switching    |
-| liburing      | 2.4+    | io_uring userspace interface   |
-| C++ standard  | C++20   | Concepts, constraints          |
-| Linux kernel  | 5.10+   | io_uring support               |
+| Dependency    | Managed by  | Version  | Purpose                        |
+|---------------|-------------|----------|--------------------------------|
+| stdexec       | FetchContent| `main`   | P2300 reference implementation |
+| Boost.Fiber   | vcpkg       | 1.84+    | Fiber runtime + work stealing  |
+| Boost.Context | vcpkg       | 1.84+    | Low-level context switching    |
+| liburing      | vcpkg       | 2.4+     | io_uring userspace interface   |
+| Catch2        | vcpkg       | 3.x      | Test framework                 |
+| C++ standard  | —           | C++20    | Concepts, constraints          |
+| Linux kernel  | —           | 5.10+    | io_uring support               |
  
 ## License
  

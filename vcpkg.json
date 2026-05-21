@@ -1,0 +1,8 @@
+{
+  "dependencies": [
+    "boost-fiber",
+    "boost-context",
+    "liburing",
+    "catch2"
+  ]
+}

@@ -1,0 +1,22 @@
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-init-variables,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  performance-*,
+  -performance-no-int-to-ptr,
+  readability-*,
+  -readability-uppercase-literal-suffix,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+WarningsAsErrors: true
+HeaderFilterRegex: fiberexec
+CheckOptions:
+  - key: cppcoreguidelines-pro-type-member-init.IgnoreArrays
+    value: true
