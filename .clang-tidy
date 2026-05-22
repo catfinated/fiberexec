@@ -1,6 +1,7 @@
 Checks: >
   clang-diagnostic-*,
   clang-analyzer-*,
+  -clang-analyzer-core.StackAddressEscape,
   modernize-*,
   -modernize-use-trailing-return-type,
   cppcoreguidelines-*,

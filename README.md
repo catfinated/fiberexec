@@ -120,6 +120,18 @@ Or run the test binary directly for more verbose output:
 ./build/debug/tests/fiberexec_tests --reporter console
 ```
 
+### Run the examples
+
+```sh
+./build/debug/examples/hello_fiber
+```
+
+Expected output:
+
+```
+Hello from a fiber!
+```
+
 ## Status
  
 This is a research project and learning exercise. It is not production-ready.

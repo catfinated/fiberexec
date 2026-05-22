@@ -1,9 +1,9 @@
 #pragma once
 
+#include <fiberexec/task.hpp>
 #include <stdexec/execution.hpp>
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <thread>
 
@@ -22,7 +22,7 @@ namespace detail {
 ///
 /// @param pool The pool to post work onto.
 /// @param work The callable to run inside a new fiber.
-void schedule_task(fiber_pool& pool, std::function<void()> work) noexcept;
+void schedule_task(fiber_pool& pool, task work) noexcept;
 
 } // namespace detail
 
@@ -78,7 +78,7 @@ public:
     /// @see fiber_context::get_scheduler()
     class scheduler {
     public:
-        using scheduler_concept = stdexec::scheduler_t; ///<  Opt-in tag required by stdexec.
+        using scheduler_concept = stdexec::scheduler_tag; ///<  Opt-in tag required by stdexec.
 
         /// Environment attached to senders produced by this scheduler.
         ///
@@ -88,7 +88,8 @@ public:
             fiber_context* ctx; ///<  Back-pointer to the owning context.
 
             /// Return the completion scheduler for any completion tag @p Tag.
-            template <class Tag> auto query(stdexec::get_completion_scheduler_t<Tag> /*tag*/) const noexcept -> scheduler {
+            template <class Tag>
+            [[nodiscard]] auto query(stdexec::get_completion_scheduler_t<Tag> /*tag*/) const noexcept -> scheduler {
                 return scheduler{ctx};
             }
         };
@@ -98,7 +99,7 @@ public:
         /// Completes with `set_value()` (no arguments) once the associated
         /// fiber has been posted to the pool and begins executing.
         struct schedule_sender {
-            using sender_concept = stdexec::sender_t;
+            using sender_concept = stdexec::sender_tag;
             using completion_signatures = stdexec::completion_signatures<stdexec::set_value_t()>;
 
             fiber_context* ctx; ///<  Non-owning pointer to the execution context.
@@ -108,18 +109,20 @@ public:
 
             /// Operation state that drives a single `schedule()` send.
             template <class Receiver> struct operation {
+                using operation_state_concept = stdexec::operation_state_tag;
+
                 Receiver rcvr;      ///<  Connected receiver.
                 fiber_context* ctx; ///<  Execution context to post onto.
 
                 /// Post a fiber that calls `set_value` on the receiver.
                 void start() noexcept {
-                    detail::schedule_task(ctx->pool(),
-                                          [r = std::move(rcvr)]() mutable { stdexec::set_value(std::move(r)); });
+                    detail::schedule_task(ctx->pool(), [this]() { stdexec::set_value(std::move(this->rcvr)); });
                 }
             };
 
             /// Connect this sender to @p rcvr and return the operation state.
-            template <stdexec::receiver Receiver> auto connect(Receiver rcvr) const noexcept -> operation<Receiver> {
+            template <stdexec::receiver Receiver>
+            [[nodiscard]] auto connect(Receiver rcvr) const noexcept -> operation<Receiver> {
                 return {std::move(rcvr), ctx};
             }
         };
