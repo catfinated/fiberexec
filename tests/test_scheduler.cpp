@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <string_view>
 #include <thread>
 
@@ -64,6 +65,17 @@ TEST_CASE("concurrent dispatch via when_all completes all tasks", "[scheduler]")
                                          stdexec::schedule(sched) | stdexec::then(inc)));
 
     REQUIRE(count.load() == 3);
+}
+
+TEST_CASE("async_sleep_for suspends the fiber for at least the requested duration", "[timer]") {
+    using namespace std::chrono_literals;
+    auto sched = g_ctx.get_scheduler();
+
+    auto const before = std::chrono::steady_clock::now();
+    stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([] { fiberexec::async_sleep_for(50ms); }));
+    auto const elapsed = std::chrono::steady_clock::now() - before;
+
+    REQUIRE(elapsed >= 50ms);
 }
 
 TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "[io]") {
