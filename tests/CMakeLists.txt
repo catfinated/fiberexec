@@ -3,6 +3,7 @@ include(Catch)
 
 add_executable(fiberexec_tests
   test_scheduler.cpp
+  test_networking.cpp
 )
 
 target_link_libraries(fiberexec_tests

@@ -3,3 +3,6 @@ target_link_libraries(hello_fiber PRIVATE fiberexec::fiberexec)
 
 add_executable(async_pipeline async_pipeline.cpp)
 target_link_libraries(async_pipeline PRIVATE fiberexec::fiberexec)
+
+add_executable(echo_server echo_server.cpp)
+target_link_libraries(echo_server PRIVATE fiberexec::fiberexec)
