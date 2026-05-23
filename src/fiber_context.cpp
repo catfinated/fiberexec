@@ -114,7 +114,6 @@ private:
             auto const tag = io_uring_cqe_get_data64(cqe);
             int const res = cqe->res;
             io_uring_cqe_seen(&ring, cqe);
-
             if (tag == k_eventfd_tag) {
                 if (res >= 0) {
                     task work;
@@ -129,7 +128,13 @@ private:
                         boost::fibers::fiber(std::move(work)).detach();
                     }
                 }
-                arm_eventfd(); // re-arm only after consuming an eventfd CQE
+                // Only re-arm if still running. On shutdown, stop() writes one
+                // token per thread. An unconditional re-arm here would consume
+                // the token meant for another thread (inline completion when the
+                // semaphore counter is still > 0), leaving that thread stuck.
+                if (running_.load(std::memory_order_acquire)) {
+                    arm_eventfd();
+                }
             } else {
                 // I/O completion — resume the suspended fiber.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -138,7 +143,12 @@ private:
             }
 
             // Yield so the scheduler can run any fibers that became ready.
-            boost::this_fiber::yield();
+            // Skip the yield on shutdown: both threads receive stop CQEs and
+            // calling yield() here races with work-stealing scheduler teardown
+            // on the other thread, causing a segfault.
+            if (running_.load(std::memory_order_relaxed)) {
+                boost::this_fiber::yield();
+            }
         }
 
         tl_ring = nullptr;
