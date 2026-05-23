@@ -9,9 +9,6 @@
 
 namespace {
 
-// NOLINTNEXTLINE(cert-err58-cpp,cppcoreguidelines-avoid-non-const-global-variables)
-fiberexec::fiber_context g_ctx{2};
-
 // A sender that has value type int but always signals set_stopped at runtime.
 // Used to test that fiber_sync_wait returns nullopt on the stopped path.
 struct always_stopped_sender {
@@ -30,7 +27,8 @@ struct always_stopped_sender {
 } // namespace
 
 TEST_CASE("fiber_sync_wait suspends fiber and collects a single value", "[fiber_sync_wait]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     int result = 0;
 
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
@@ -43,7 +41,8 @@ TEST_CASE("fiber_sync_wait suspends fiber and collects a single value", "[fiber_
 }
 
 TEST_CASE("fiber_sync_wait fans out with when_all and collects all values", "[fiber_sync_wait]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     int sum = 0;
 
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
@@ -58,7 +57,8 @@ TEST_CASE("fiber_sync_wait fans out with when_all and collects all values", "[fi
 }
 
 TEST_CASE("fiber_sync_wait propagates set_error as an exception", "[fiber_sync_wait]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     bool threw = false;
 
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
@@ -75,7 +75,8 @@ TEST_CASE("fiber_sync_wait propagates set_error as an exception", "[fiber_sync_w
 }
 
 TEST_CASE("fiber_sync_wait returns nullopt on set_stopped", "[fiber_sync_wait]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     bool got_nullopt = false;
 
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
@@ -89,7 +90,8 @@ TEST_CASE("fiber_sync_wait returns nullopt on set_stopped", "[fiber_sync_wait]")
 TEST_CASE("fiber_sync_wait works with async I/O fan-out", "[fiber_sync_wait]") {
     // Fan out two concurrent async_recv calls and collect both results.
     using namespace std::chrono_literals;
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     std::array<int, 2> sv1{};
     std::array<int, 2> sv2{};

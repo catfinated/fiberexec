@@ -15,17 +15,13 @@
 #include <system_error>
 #include <thread>
 
-namespace {
-// NOLINTNEXTLINE(cert-err58-cpp,cppcoreguidelines-avoid-non-const-global-variables)
-fiberexec::fiber_context g_ctx{2};
-} // namespace
-
 TEST_CASE("fiber_scheduler satisfies stdexec::scheduler concept", "[scheduler]") {
     STATIC_REQUIRE(stdexec::scheduler<fiberexec::fiber_scheduler>);
 }
 
 TEST_CASE("scheduled work executes", "[scheduler]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     std::atomic<bool> ran{false};
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&ran] { ran.store(true); }));
@@ -34,7 +30,8 @@ TEST_CASE("scheduled work executes", "[scheduler]") {
 }
 
 TEST_CASE("work executes on a worker thread, not the caller", "[scheduler]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     std::thread::id work_thread{};
     stdexec::sync_wait(stdexec::schedule(sched) |
@@ -45,7 +42,8 @@ TEST_CASE("work executes on a worker thread, not the caller", "[scheduler]") {
 }
 
 TEST_CASE("multiple sequential dispatches all complete", "[scheduler]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     std::atomic<int> count{0};
     for (int i = 0; i < 8; ++i) {
@@ -56,7 +54,8 @@ TEST_CASE("multiple sequential dispatches all complete", "[scheduler]") {
 }
 
 TEST_CASE("concurrent dispatch via when_all completes all tasks", "[scheduler]") {
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     std::atomic<int> count{0};
     auto inc = [&count] { count.fetch_add(1); };
@@ -70,7 +69,8 @@ TEST_CASE("concurrent dispatch via when_all completes all tasks", "[scheduler]")
 
 TEST_CASE("async_sleep_for suspends the fiber for at least the requested duration", "[timer]") {
     using namespace std::chrono_literals;
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     auto const before = std::chrono::steady_clock::now();
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([] { fiberexec::async_sleep_for(50ms); }));
@@ -83,7 +83,8 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
     std::stop_source ss;
     ss.request_stop();
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     bool threw = false;
 
     std::array<int, 2> pipefd{};
@@ -107,7 +108,8 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
 
 TEST_CASE("async_sleep_for cancelled by stop_source", "[cancellation]") {
     using namespace std::chrono_literals;
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     std::stop_source ss;
     bool cancelled = false;
 
@@ -132,7 +134,8 @@ TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     std::stop_source ss;
     bool cancelled = false;
 
@@ -164,7 +167,8 @@ TEST_CASE("async_read cancelled automatically via sender stop token", "[cancella
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     bool auto_cancelled = false;
 
     try {
@@ -199,7 +203,8 @@ TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
 
     constexpr std::string_view kMsg = "ping";
     std::array<char, 4> buf{};

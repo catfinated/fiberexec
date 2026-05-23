@@ -15,17 +15,13 @@
 #include <string_view>
 #include <system_error>
 
-namespace {
-// NOLINTNEXTLINE(cert-err58-cpp,cppcoreguidelines-avoid-non-const-global-variables)
-fiberexec::fiber_context g_ctx{2};
-} // namespace
-
 TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking]") {
+    fiberexec::fiber_context ctx{2};
     std::array<int, 2> sv{};
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
     auto [recv_fd, send_fd] = sv;
 
-    auto sched = g_ctx.get_scheduler();
+    auto sched = ctx.get_scheduler();
     constexpr std::string_view kMsg = "ping";
     std::array<char, 4> buf{};
 
@@ -57,7 +53,8 @@ TEST_CASE("async_accept and async_connect establish a TCP connection", "[network
     socklen_t addrlen = sizeof(addr);
     REQUIRE(::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == 0);
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     constexpr std::string_view kMsg = "hello";
     std::array<char, 5> buf{};
     int accepted_fd = -1;
@@ -91,7 +88,8 @@ TEST_CASE("async_recv cancelled automatically via sender stop token", "[networki
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
     auto [recv_fd, send_fd] = sv;
 
-    auto sched = g_ctx.get_scheduler();
+    fiberexec::fiber_context ctx{2};
+    auto sched = ctx.get_scheduler();
     bool auto_cancelled = false;
 
     try {
