@@ -16,6 +16,9 @@ ssize_t async_read(int fd, void* buf, std::size_t len, std::stop_token st) {
     if (ring == nullptr) {
         throw std::runtime_error("async_read called outside of a fiberexec fiber");
     }
+    if (!st.stop_possible()) {
+        st = detail::current_fiber_stop_token();
+    }
     if (st.stop_requested()) {
         throw std::system_error(ECANCELED, std::system_category(), "async_read");
     }
@@ -33,6 +36,9 @@ ssize_t async_write(int fd, void const* buf, std::size_t len, std::stop_token st
     if (ring == nullptr) {
         throw std::runtime_error("async_write called outside of a fiberexec fiber");
     }
+    if (!st.stop_possible()) {
+        st = detail::current_fiber_stop_token();
+    }
     if (st.stop_requested()) {
         throw std::system_error(ECANCELED, std::system_category(), "async_write");
     }
@@ -49,6 +55,9 @@ void async_sleep_for(std::chrono::nanoseconds duration, std::stop_token st) {
     io_uring* ring = detail::current_ring();
     if (ring == nullptr) {
         throw std::runtime_error("async_sleep_for called outside of a fiberexec fiber");
+    }
+    if (!st.stop_possible()) {
+        st = detail::current_fiber_stop_token();
     }
     if (st.stop_requested()) {
         throw std::system_error(ECANCELED, std::system_category(), "async_sleep_for");

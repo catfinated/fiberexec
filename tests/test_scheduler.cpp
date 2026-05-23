@@ -157,6 +157,45 @@ TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
     REQUIRE(cancelled);
 }
 
+TEST_CASE("async_read cancelled automatically via sender stop token", "[cancellation]") {
+    // when_all cancels remaining branches when any branch errors. With ADR-0001
+    // implemented, the stop token flows into the reader fiber automatically so
+    // async_read (no explicit token) is cancelled without any user wiring.
+    using namespace std::chrono_literals;
+    std::array<int, 2> pipefd{};
+    REQUIRE(::pipe(pipefd.data()) == 0);
+    auto [read_fd, write_fd] = pipefd;
+
+    auto sched = g_ctx.get_scheduler();
+    bool auto_cancelled = false;
+
+    try {
+        stdexec::sync_wait(stdexec::when_all(
+            // Reader: blocks on empty pipe, no explicit stop token.
+            stdexec::schedule(sched) | stdexec::then([&] {
+                try {
+                    std::array<char, 4> buf{};
+                    fiberexec::async_read(read_fd, buf.data(), buf.size());
+                } catch (std::system_error const& e) {
+                    auto_cancelled = (e.code().value() == ECANCELED);
+                }
+            }),
+            // Trigger: short sleep then throw, which causes when_all to
+            // request stop on the reader's receiver environment.
+            stdexec::schedule(sched) | stdexec::then([&] {
+                fiberexec::async_sleep_for(10ms);
+                throw std::runtime_error("trigger cancel");
+            })));
+    } catch (...) {
+        // when_all propagates the error from the trigger fiber; ignore it here.
+    }
+
+    ::close(read_fd);
+    ::close(write_fd);
+
+    REQUIRE(auto_cancelled);
+}
+
 TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "[io]") {
     std::array<int, 2> pipefd{};
     REQUIRE(::pipe(pipefd.data()) == 0);

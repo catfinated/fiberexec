@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <thread>
 
@@ -41,6 +42,14 @@ void schedule_task(fiber_pool& pool, task work) noexcept;
 /// an IORING_OP_ASYNC_CANCEL is submitted and the return value will be
 /// -ECANCELED once the kernel confirms the cancellation.
 int submit_and_wait(io_uring_sqe* sqe, std::stop_token st = {});
+
+/// Install @p tok as the stop token for the currently running fiber.
+/// Called by operation::start() before invoking set_value on the receiver.
+void install_fiber_stop_token(std::stop_token tok);
+
+/// Return the stop token installed for the current fiber, or an empty
+/// (non-stoppable) token if none was installed.
+[[nodiscard]] std::stop_token current_fiber_stop_token();
 
 } // namespace detail
 
@@ -126,22 +135,51 @@ public:
             [[nodiscard]] env get_env() const noexcept { return {ctx}; }
 
             /// Operation state that drives a single `schedule()` send.
+            ///
+            /// Bridges the receiver environment's stop token into a
+            /// `std::stop_token` stored in fiber-local storage so that
+            /// `async_read` / `async_write` / `async_sleep_for` are
+            /// automatically cancellable without explicit token threading.
             template <class Receiver> struct operation {
                 using operation_state_concept = stdexec::operation_state_tag;
+                using stop_token_t = stdexec::stop_token_of_t<stdexec::env_of_t<Receiver>>;
 
-                Receiver rcvr;      ///<  Connected receiver.
-                fiber_context* ctx; ///<  Execution context to post onto.
+                /// Forwards a stop request from the receiver's token to the
+                /// fiber-local stop source so async ops can observe it.
+                struct stop_forwarder {
+                    std::stop_source* src{nullptr};
+                    void operator()() const noexcept { src->request_stop(); }
+                };
+                using stop_cb_t = stdexec::stop_callback_for_t<stop_token_t, stop_forwarder>;
 
-                /// Post a fiber that calls `set_value` on the receiver.
+                Receiver rcvr;               ///<  Connected receiver.
+                fiber_context* ctx{nullptr}; ///<  Execution context to post onto.
+                /// Per-operation stop source. Starts with no shared state to
+                /// avoid a heap allocation when cancellation is not in use;
+                /// start() allocates a real shared state only if the receiver's
+                /// token is stoppable.
+                std::stop_source fiber_stop_{std::nostopstate};
+                std::optional<stop_cb_t> stop_cb_; ///<  Bridges receiver token → fiber_stop_.
+
+                /// Post a fiber that installs the bridged stop token and then
+                /// calls set_value on the receiver.
                 void start() noexcept {
-                    detail::schedule_task(ctx->pool(), [this]() { stdexec::set_value(std::move(this->rcvr)); });
+                    auto env_tok = stdexec::get_stop_token(stdexec::get_env(rcvr));
+                    if (env_tok.stop_possible()) {
+                        fiber_stop_ = std::stop_source{};
+                        stop_cb_.emplace(env_tok, stop_forwarder{&fiber_stop_});
+                    }
+                    detail::schedule_task(ctx->pool(), [this, tok = fiber_stop_.get_token()]() mutable {
+                        detail::install_fiber_stop_token(std::move(tok));
+                        stdexec::set_value(std::move(this->rcvr));
+                    });
                 }
             };
 
             /// Connect this sender to @p rcvr and return the operation state.
             template <stdexec::receiver Receiver>
-            [[nodiscard]] auto connect(Receiver rcvr) const noexcept -> operation<Receiver> {
-                return {std::move(rcvr), ctx};
+            [[nodiscard]] auto connect(Receiver rcvr) const -> operation<Receiver> {
+                return {std::move(rcvr), ctx, std::stop_source{std::nostopstate}, std::nullopt};
             }
         };
 

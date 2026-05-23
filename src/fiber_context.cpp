@@ -24,6 +24,11 @@ class io_uring_scheduler; // forward declaration for tl_scheduler
 thread_local io_uring* tl_ring = nullptr;                // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 thread_local io_uring_scheduler* tl_scheduler = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
+// Per-fiber stop token. fiber_specific_ptr gives each Boost.Fiber its own
+// slot; thread_local would be wrong because multiple fibers share a thread.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+boost::fibers::fiber_specific_ptr<std::stop_token> fiber_stop_token;
+
 // Parked on the suspended fiber's stack; pointer lives in sqe->user_data.
 struct io_awaitable {
     boost::fibers::promise<int> promise;
@@ -244,6 +249,17 @@ private:
 namespace detail {
 
 io_uring* current_ring() noexcept { return tl_ring; }
+
+void install_fiber_stop_token(std::stop_token tok) {
+    // fiber_specific_ptr takes ownership of the raw pointer and deletes it
+    // when the fiber exits. NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    fiber_stop_token.reset(new std::stop_token(std::move(tok)));
+}
+
+std::stop_token current_fiber_stop_token() {
+    auto* p = fiber_stop_token.get();
+    return p != nullptr ? *p : std::stop_token{};
+}
 
 int submit_and_wait(io_uring_sqe* sqe, std::stop_token st) {
     io_awaitable awaitable;
