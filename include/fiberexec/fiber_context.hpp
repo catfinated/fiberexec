@@ -7,6 +7,10 @@
 #include <memory>
 #include <thread>
 
+// Forward-declare liburing types so callers don't need to pull in <liburing.h>.
+struct io_uring;     // NOLINT(bugprone-reserved-identifier)
+struct io_uring_sqe; // NOLINT(bugprone-reserved-identifier)
+
 namespace fiberexec {
 
 class fiber_pool;
@@ -23,6 +27,15 @@ namespace detail {
 /// @param pool The pool to post work onto.
 /// @param work The callable to run inside a new fiber.
 void schedule_task(fiber_pool& pool, task work) noexcept;
+
+/// Return the io_uring ring owned by the current worker thread, or nullptr if
+/// the calling thread is not a fiberexec worker.
+[[nodiscard]] io_uring* current_ring() noexcept;
+
+/// Submit @p sqe to the current thread's ring and suspend the calling fiber
+/// until the completion event arrives.  Returns the CQE result (negative errno
+/// on I/O failure).  Must be called from a fiber running on a fiberexec worker.
+int submit_and_wait(io_uring_sqe* sqe);
 
 } // namespace detail
 

@@ -4,4 +4,7 @@
 ///
 /// @see fiber_context
 /// @see fiber_scheduler
+/// @see async_read
+/// @see async_write
+#include <fiberexec/async_io.hpp>
 #include <fiberexec/fiber_context.hpp>

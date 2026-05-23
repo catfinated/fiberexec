@@ -16,6 +16,37 @@
 
 namespace fiberexec {
 
+namespace {
+
+thread_local io_uring* tl_ring = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+// Parked on the suspended fiber's stack; pointer lives in sqe->user_data.
+struct io_awaitable {
+    boost::fibers::promise<int> promise;
+};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// detail — I/O helpers callable from within fiber bodies
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+io_uring* current_ring() noexcept { return tl_ring; }
+
+int submit_and_wait(io_uring_sqe* sqe) {
+    io_awaitable awaitable;
+    auto future = awaitable.promise.get_future();
+    io_uring_sqe_set_data(sqe, std::addressof(awaitable));
+    if (int ret = io_uring_submit(tl_ring); ret < 0) {
+        throw std::system_error(-ret, std::system_category(), "io_uring_submit");
+    }
+    return future.get(); // suspends this fiber until the CQE arrives
+}
+
+} // namespace detail
+
 // ---------------------------------------------------------------------------
 // fiber_pool — owns the OS threads, fiber scheduler, and per-thread io_uring
 // ---------------------------------------------------------------------------
@@ -54,7 +85,7 @@ public:
             std::scoped_lock lock{mtx_};
             work_queue_.push(std::move(work));
         }
-        const uint64_t val = 1;
+        uint64_t const val = 1;
         ::write(eventfd_, &val, sizeof(val));
     }
 
@@ -66,61 +97,63 @@ private:
         if (int res = io_uring_queue_init(k_ring_entries, &ring, 0); res < 0) {
             throw std::system_error(-res, std::system_category(), "io_uring_queue_init");
         }
-        thread_ring_ = &ring;
+        tl_ring = &ring;
 
-        while (running_.load(std::memory_order_relaxed)) {
-            // Arm an async read on the pool eventfd. With EFD_SEMAPHORE each
-            // write(1) allows exactly one read to complete, so exactly one
-            // worker wakes per post().
-            uint64_t efd_val = 0;
+        uint64_t efd_val = 0;
+        auto arm_eventfd = [&] {
             io_uring_sqe* sqe = io_uring_get_sqe(&ring);
             io_uring_prep_read(sqe, eventfd_, &efd_val, sizeof(efd_val), 0);
-            sqe->user_data = k_eventfd_tag;
+            io_uring_sqe_set_data64(sqe, k_eventfd_tag);
             io_uring_submit(&ring);
+        };
+        arm_eventfd(); // arm once before entering the loop
 
+        while (running_.load(std::memory_order_relaxed)) {
             io_uring_cqe* cqe = nullptr;
             io_uring_wait_cqe(&ring, &cqe);
-            const int res = cqe->res;
+            auto const tag = io_uring_cqe_get_data64(cqe);
+            int const res = cqe->res;
             io_uring_cqe_seen(&ring, cqe);
 
-            if (res < 0) {
-                // Unexpected error on the eventfd read — skip dispatch.
-                continue;
-            }
-
-            task work;
-            {
-                std::scoped_lock lock{mtx_};
-                if (!work_queue_.empty()) {
-                    work = std::move(work_queue_.front());
-                    work_queue_.pop();
+            if (tag == k_eventfd_tag) {
+                if (res >= 0) {
+                    task work;
+                    {
+                        std::scoped_lock lock{mtx_};
+                        if (!work_queue_.empty()) {
+                            work = std::move(work_queue_.front());
+                            work_queue_.pop();
+                        }
+                    }
+                    if (work) {
+                        boost::fibers::fiber(std::move(work)).detach();
+                    }
                 }
+                arm_eventfd(); // re-arm only after consuming an eventfd CQE
+            } else {
+                // I/O completion — resume the suspended fiber.
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                auto* awaitable = reinterpret_cast<io_awaitable*>(tag);
+                awaitable->promise.set_value(res);
             }
 
-            if (work) {
-                boost::fibers::fiber(std::move(work)).detach();
-            }
-
-            // Yield so the scheduler runs any newly launched fiber before
-            // we block again in io_uring_wait_cqe.
+            // Yield so the scheduler can run any fibers that became ready.
             boost::this_fiber::yield();
         }
 
-        thread_ring_ = nullptr;
+        tl_ring = nullptr;
         io_uring_queue_exit(&ring);
     }
 
     void stop() {
         running_.store(false);
-        // Write one token per worker thread so every blocked io_uring_wait_cqe
-        // returns and each worker observes running_ = false.
-        const uint64_t val = threads_.size();
+        // Write one token per worker so every blocked io_uring_wait_cqe returns.
+        uint64_t const val = threads_.size();
         ::write(eventfd_, &val, sizeof(val));
     }
 
     static constexpr unsigned k_ring_entries = 256;
     static constexpr uint64_t k_eventfd_tag = 0;
-    static thread_local io_uring* thread_ring_;
 
     std::atomic<bool> running_;
     int eventfd_;
@@ -129,10 +162,8 @@ private:
     std::queue<task> work_queue_;
 };
 
-thread_local io_uring* fiber_pool::thread_ring_ = nullptr;
-
 // ---------------------------------------------------------------------------
-// schedule_task — non-template bridge between header and Boost.Fiber
+// schedule_task
 // ---------------------------------------------------------------------------
 
 namespace detail {

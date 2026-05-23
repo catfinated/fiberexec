@@ -1,5 +1,6 @@
 add_library(fiberexec
   fiber_context.cpp
+  async_io.cpp
 )
 
 add_library(fiberexec::fiberexec ALIAS fiberexec)
