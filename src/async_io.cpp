@@ -1,5 +1,5 @@
 #include <fiberexec/async_io.hpp>
-#include <fiberexec/fiber_context.hpp>
+#include <fiberexec/detail/fiber_ops.hpp>
 
 #include <liburing.h>
 

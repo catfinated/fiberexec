@@ -1,6 +1,6 @@
 #pragma once
 
-#include <fiberexec/task.hpp>
+#include <fiberexec/detail/fiber_ops.hpp>
 #include <stdexec/execution.hpp>
 
 #include <cstdint>
@@ -9,60 +9,19 @@
 #include <stop_token>
 #include <thread>
 
-// Forward-declare liburing types so callers don't need to pull in <liburing.h>.
-struct io_uring;     // NOLINT(bugprone-reserved-identifier)
-struct io_uring_sqe; // NOLINT(bugprone-reserved-identifier)
-
 namespace fiberexec {
 
-class fiber_pool;
-
-namespace detail {
-
-/// Route a callable onto the fiber pool without exposing Boost headers.
-///
-/// This is an internal bridge used by
-/// `scheduler::schedule_sender::operation::start()`. It is declared in the
-/// public header only because `start()` must be inline (it is a template);
-/// nothing outside of fiberexec should call it directly.
-///
-/// @param pool The pool to post work onto.
-/// @param work The callable to run inside a new fiber.
-void schedule_task(fiber_pool& pool, task work) noexcept;
-
-/// Return the io_uring ring owned by the current worker thread, or nullptr if
-/// the calling thread is not a fiberexec worker.
-[[nodiscard]] io_uring* current_ring() noexcept;
-
-/// Submit @p sqe to the current thread's ring and suspend the calling fiber
-/// until the completion event arrives.  Returns the CQE result (negative errno
-/// on I/O failure).  Must be called from a fiber running on a fiberexec worker.
-///
-/// If @p st is cancellable and stop is requested while the fiber is suspended,
-/// an IORING_OP_ASYNC_CANCEL is submitted and the return value will be
-/// -ECANCELED once the kernel confirms the cancellation.
-int submit_and_wait(io_uring_sqe* sqe, std::stop_token st = {});
-
-/// Install @p tok as the stop token for the currently running fiber.
-/// Called by operation::start() before invoking set_value on the receiver.
-void install_fiber_stop_token(std::stop_token tok);
-
-/// Return the stop token installed for the current fiber, or an empty
-/// (non-stoppable) token if none was installed.
-[[nodiscard]] std::stop_token current_fiber_stop_token();
-
-} // namespace detail
-
-/// Execution context that owns a Boost.Fiber work-stealing thread pool backed
+/// Execution context that owns a thread pool of Boost.Fiber workers backed
 /// by io_uring.
 ///
-/// Each OS thread in the pool runs its own Boost.Fiber scheduler and an
-/// independent `io_uring` instance. When a fiber issues I/O it suspends
-/// cooperatively; the per-thread event loop reaps completions and resumes
-/// the fiber — no OS thread ever blocks.
+/// Each OS thread in the pool runs a custom `io_uring`-aware Boost.Fiber
+/// scheduling algorithm. When a fiber issues I/O it suspends cooperatively;
+/// the per-thread event loop reaps completions and resumes the fiber — no OS
+/// thread ever blocks.
 ///
-/// **Lifetime:** create exactly one `fiber_context` and keep it alive for as
-/// long as work is being scheduled through it.
+/// Multiple independent `fiber_context` instances may coexist in the same
+/// process. Each context owns its OS threads and io_uring rings and is
+/// entirely self-contained.
 ///
 /// - Non-copyable and non-movable — it owns OS threads and kernel resources.
 /// - Obtain a lightweight scheduler handle via `get_scheduler()`.

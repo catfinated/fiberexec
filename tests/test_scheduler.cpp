@@ -15,8 +15,6 @@
 #include <system_error>
 #include <thread>
 
-// All tests share one pool so the Boost.Fiber work-stealing scheduler's
-// global thread ID counter stays within the pool's registered slot range.
 namespace {
 // NOLINTNEXTLINE(cert-err58-cpp,cppcoreguidelines-avoid-non-const-global-variables)
 fiberexec::fiber_context g_ctx{2};
