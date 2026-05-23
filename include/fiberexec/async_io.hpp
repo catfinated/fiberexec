@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <stop_token>
 #include <sys/types.h>
 
 namespace fiberexec {
@@ -12,10 +13,13 @@ namespace fiberexec {
 /// completion event arrives — the OS thread is never blocked.  Must be called
 /// from a fiber running on a fiberexec worker thread.
 ///
+/// If @p st is cancellable and stop is requested while the fiber is suspended,
+/// the operation is cancelled and throws std::system_error(ECANCELED).
+///
 /// @returns Number of bytes read.
-/// @throws std::system_error on I/O failure.
+/// @throws std::system_error on I/O failure or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_read(int fd, void* buf, std::size_t len);
+ssize_t async_read(int fd, void* buf, std::size_t len, std::stop_token st = {});
 
 /// Asynchronously write @p len bytes from @p buf to @p fd.
 ///
@@ -23,10 +27,13 @@ ssize_t async_read(int fd, void* buf, std::size_t len);
 /// completion event arrives — the OS thread is never blocked.  Must be called
 /// from a fiber running on a fiberexec worker thread.
 ///
+/// If @p st is cancellable and stop is requested while the fiber is suspended,
+/// the operation is cancelled and throws std::system_error(ECANCELED).
+///
 /// @returns Number of bytes written.
-/// @throws std::system_error on I/O failure.
+/// @throws std::system_error on I/O failure or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_write(int fd, void const* buf, std::size_t len);
+ssize_t async_write(int fd, void const* buf, std::size_t len, std::stop_token st = {});
 
 /// Suspend the calling fiber for at least @p duration.
 ///
@@ -34,8 +41,11 @@ ssize_t async_write(int fd, void const* buf, std::size_t len);
 /// the OS thread is never blocked.  Must be called from a fiber running on a
 /// fiberexec worker thread.
 ///
-/// @throws std::system_error on unexpected io_uring error.
+/// If @p st is cancellable and stop is requested while the fiber is suspended,
+/// the sleep is cancelled and throws std::system_error(ECANCELED).
+///
+/// @throws std::system_error on unexpected io_uring error or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-void async_sleep_for(std::chrono::nanoseconds duration);
+void async_sleep_for(std::chrono::nanoseconds duration, std::stop_token st = {});
 
 } // namespace fiberexec

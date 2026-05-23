@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <mutex>
 #include <queue>
+#include <stop_token>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -18,7 +19,10 @@ namespace fiberexec {
 
 namespace {
 
-thread_local io_uring* tl_ring = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+class io_uring_scheduler; // forward declaration for tl_scheduler
+
+thread_local io_uring* tl_ring = nullptr;                // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+thread_local io_uring_scheduler* tl_scheduler = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Parked on the suspended fiber's stack; pointer lives in sqe->user_data.
 struct io_awaitable {
@@ -28,6 +32,7 @@ struct io_awaitable {
 // Sentinel tags that occupy values aligned heap pointers can never have.
 constexpr uint64_t k_work_tag = 0;
 constexpr uint64_t k_notify_tag = 1;
+constexpr uint64_t k_cancel_tag = 2;
 
 // ---------------------------------------------------------------------------
 // io_uring_scheduler
@@ -56,12 +61,14 @@ public:
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init");
         }
         tl_ring = &ring_;
+        tl_scheduler = this;
         arm_work_efd();
         arm_notify();
     }
 
     ~io_uring_scheduler() override {
         tl_ring = nullptr;
+        tl_scheduler = nullptr;
         io_uring_queue_exit(&ring_);
         ::close(notify_fd_);
     }
@@ -126,6 +133,18 @@ public:
         ::write(notify_fd_, &val, sizeof(val));
     }
 
+    // Thread-safe. Queues a cancel request for the in-flight op whose SQE
+    // user_data is user_data, then wakes the owning thread so it can submit
+    // the IORING_OP_ASYNC_CANCEL SQE on the next drain pass.
+    void request_cancel(void* user_data) noexcept {
+        {
+            std::scoped_lock lk{cancel_queue_mtx_};
+            cancel_queue_.push(user_data);
+        }
+        uint64_t val = 1;
+        ::write(notify_fd_, &val, sizeof(val));
+    }
+
 private:
     static constexpr unsigned k_ring_entries = 256;
 
@@ -141,6 +160,22 @@ private:
         io_uring_prep_read(sqe, notify_fd_, &notify_val_, sizeof(notify_val_), 0);
         io_uring_sqe_set_data64(sqe, k_notify_tag);
         io_uring_submit(&ring_);
+    }
+
+    // Submit cancel SQEs for all requests queued via request_cancel(). Must be
+    // called from the owning thread only; arm_notify's io_uring_submit will
+    // flush these together with the re-arm SQE.
+    void flush_cancel_queue() noexcept {
+        std::scoped_lock lk{cancel_queue_mtx_};
+        while (!cancel_queue_.empty()) {
+            io_uring_sqe* csqe = io_uring_get_sqe(&ring_);
+            if (csqe == nullptr) {
+                break; // ring full; items remain for next wakeup
+            }
+            io_uring_prep_cancel(csqe, cancel_queue_.front(), 0);
+            io_uring_sqe_set_data64(csqe, k_cancel_tag);
+            cancel_queue_.pop();
+        }
     }
 
     // Process every CQE currently in the ring. Creates fibers for new work,
@@ -173,7 +208,10 @@ private:
                     arm_work_efd();
                 }
             } else if (tag == k_notify_tag) {
-                arm_notify(); // always re-arm; notify is used for shutdown too
+                flush_cancel_queue();
+                arm_notify();
+            } else if (tag == k_cancel_tag) {
+                // Cancel op completed (res==0 found, -ENOENT not found): ignore.
             } else {
                 // I/O completion — resume the suspended fiber.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -193,6 +231,8 @@ private:
     std::queue<boost::fibers::context*> ready_;
     uint64_t work_efd_val_{0};
     uint64_t notify_val_{0};
+    std::mutex cancel_queue_mtx_;
+    std::queue<void*> cancel_queue_;
 };
 
 } // namespace
@@ -205,12 +245,20 @@ namespace detail {
 
 io_uring* current_ring() noexcept { return tl_ring; }
 
-int submit_and_wait(io_uring_sqe* sqe) {
+int submit_and_wait(io_uring_sqe* sqe, std::stop_token st) {
     io_awaitable awaitable;
     auto future = awaitable.promise.get_future();
     io_uring_sqe_set_data(sqe, std::addressof(awaitable));
     if (int ret = io_uring_submit(tl_ring); ret < 0) {
         throw std::system_error(-ret, std::system_category(), "io_uring_submit");
+    }
+    if (st.stop_possible()) {
+        // Capture scheduler pointer now; tl_scheduler is thread-local and
+        // the callback may fire from a different thread.
+        auto* sched = tl_scheduler;
+        std::stop_callback cb{std::move(st),
+                              [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); }};
+        return future.get(); // cb destructs here, deregistering the callback
     }
     return future.get(); // suspends this fiber until the CQE arrives
 }

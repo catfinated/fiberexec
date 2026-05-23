@@ -8,8 +8,11 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <stop_token>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 // All tests share one pool so the Boost.Fiber work-stealing scheduler's
@@ -76,6 +79,82 @@ TEST_CASE("async_sleep_for suspends the fiber for at least the requested duratio
     auto const elapsed = std::chrono::steady_clock::now() - before;
 
     REQUIRE(elapsed >= 50ms);
+}
+
+TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellation]") {
+    std::stop_source ss;
+    ss.request_stop();
+
+    auto sched = g_ctx.get_scheduler();
+    bool threw = false;
+
+    std::array<int, 2> pipefd{};
+    REQUIRE(::pipe(pipefd.data()) == 0);
+    auto [read_fd, write_fd] = pipefd;
+
+    stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
+                           try {
+                               std::array<char, 4> buf{};
+                               fiberexec::async_read(read_fd, buf.data(), buf.size(), ss.get_token());
+                           } catch (std::system_error const& e) {
+                               threw = (e.code().value() == ECANCELED);
+                           }
+                       }));
+
+    ::close(read_fd);
+    ::close(write_fd);
+
+    REQUIRE(threw);
+}
+
+TEST_CASE("async_sleep_for cancelled by stop_source", "[cancellation]") {
+    using namespace std::chrono_literals;
+    auto sched = g_ctx.get_scheduler();
+    std::stop_source ss;
+    bool cancelled = false;
+
+    stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
+                                             try {
+                                                 fiberexec::async_sleep_for(60s, ss.get_token());
+                                             } catch (std::system_error const& e) {
+                                                 cancelled = (e.code().value() == ECANCELED);
+                                             }
+                                         }),
+                                         stdexec::schedule(sched) | stdexec::then([&] {
+                                             fiberexec::async_sleep_for(10ms);
+                                             ss.request_stop();
+                                         })));
+
+    REQUIRE(cancelled);
+}
+
+TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
+    using namespace std::chrono_literals;
+    std::array<int, 2> pipefd{};
+    REQUIRE(::pipe(pipefd.data()) == 0);
+    auto [read_fd, write_fd] = pipefd;
+
+    auto sched = g_ctx.get_scheduler();
+    std::stop_source ss;
+    bool cancelled = false;
+
+    stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
+                                             try {
+                                                 std::array<char, 4> buf{};
+                                                 fiberexec::async_read(read_fd, buf.data(), buf.size(), ss.get_token());
+                                             } catch (std::system_error const& e) {
+                                                 cancelled = (e.code().value() == ECANCELED);
+                                             }
+                                         }),
+                                         stdexec::schedule(sched) | stdexec::then([&] {
+                                             fiberexec::async_sleep_for(10ms);
+                                             ss.request_stop();
+                                         })));
+
+    ::close(read_fd);
+    ::close(write_fd);
+
+    REQUIRE(cancelled);
 }
 
 TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "[io]") {

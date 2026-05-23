@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <stop_token>
 #include <thread>
 
 // Forward-declare liburing types so callers don't need to pull in <liburing.h>.
@@ -35,7 +36,11 @@ void schedule_task(fiber_pool& pool, task work) noexcept;
 /// Submit @p sqe to the current thread's ring and suspend the calling fiber
 /// until the completion event arrives.  Returns the CQE result (negative errno
 /// on I/O failure).  Must be called from a fiber running on a fiberexec worker.
-int submit_and_wait(io_uring_sqe* sqe);
+///
+/// If @p st is cancellable and stop is requested while the fiber is suspended,
+/// an IORING_OP_ASYNC_CANCEL is submitted and the return value will be
+/// -ECANCELED once the kernel confirms the cancellation.
+int submit_and_wait(io_uring_sqe* sqe, std::stop_token st = {});
 
 } // namespace detail
 
