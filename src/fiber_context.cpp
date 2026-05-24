@@ -334,6 +334,7 @@ private:
     }
 
     void stop() {
+        std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
         running_.store(false, std::memory_order_release);
         // notify_all wakes every parked main fiber via each scheduler's notify(),
         // which writes to that thread's per-thread eventfd to interrupt io_uring.

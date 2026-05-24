@@ -4,9 +4,11 @@
 
 #include <stdexec/execution.hpp>
 
-#include <boost/fiber/future.hpp>
+#include <boost/fiber/condition_variable.hpp>
+#include <boost/fiber/mutex.hpp>
 
 #include <exception>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <system_error>
@@ -17,33 +19,64 @@ namespace fiberexec {
 
 namespace detail {
 
-// Receiver that fulfills a boost::fibers::promise on any completion signal.
-// The fiber waiting on the corresponding future is suspended (not blocked)
-// until the promise is set — whether from the same thread or another.
+// Heap-allocated synchronization state shared between fiber_sync_wait (the
+// waiter) and sync_wait_receiver (the completer). Using shared_ptr instead of
+// a stack-allocated promise/future avoids a use-after-free: when the receiver's
+// set_value wakes the outer fiber on another OS thread, that fiber can destroy
+// the operation state (and the receiver inside it) while we are still executing
+// inside notify_all(). The local shared_ptr copy in each completion method
+// keeps the state alive through the notify_all() call.
+template <class ValueTuple> struct fiber_sync_state {
+    boost::fibers::mutex mtx;
+    boost::fibers::condition_variable cv;
+    std::optional<ValueTuple> value; // engaged on set_value, empty on set_stopped
+    std::exception_ptr error;        // set on set_error
+    bool done{false};
+};
+
 template <class ValueTuple> struct sync_wait_receiver {
     using receiver_concept = stdexec::receiver_tag;
 
-    boost::fibers::promise<std::optional<ValueTuple>>* promise_; // non-owning
+    std::shared_ptr<fiber_sync_state<ValueTuple>> state_;
 
     template <class... Args> void set_value(Args&&... args) noexcept {
-        try {
-            promise_->set_value(std::make_optional<ValueTuple>(std::forward<Args>(args)...));
-        } catch (...) {
-            promise_->set_exception(std::current_exception());
+        auto s = state_; // local copy keeps state alive past notify_all
+        {
+            std::unique_lock<boost::fibers::mutex> lk{s->mtx};
+            try {
+                s->value = std::make_optional<ValueTuple>(std::forward<Args>(args)...);
+            } catch (...) {
+                s->error = std::current_exception();
+            }
+            s->done = true;
         }
+        s->cv.notify_all();
     }
 
     template <class Error> void set_error(Error&& e) noexcept {
-        if constexpr (std::same_as<std::decay_t<Error>, std::exception_ptr>) {
-            promise_->set_exception(std::forward<Error>(e));
-        } else if constexpr (std::same_as<std::decay_t<Error>, std::error_code>) {
-            promise_->set_exception(std::make_exception_ptr(std::system_error(std::forward<Error>(e))));
-        } else {
-            promise_->set_exception(std::make_exception_ptr(std::forward<Error>(e)));
+        auto s = state_;
+        {
+            std::unique_lock<boost::fibers::mutex> lk{s->mtx};
+            if constexpr (std::same_as<std::decay_t<Error>, std::exception_ptr>) {
+                s->error = std::forward<Error>(e);
+            } else if constexpr (std::same_as<std::decay_t<Error>, std::error_code>) {
+                s->error = std::make_exception_ptr(std::system_error(std::forward<Error>(e)));
+            } else {
+                s->error = std::make_exception_ptr(std::forward<Error>(e));
+            }
+            s->done = true;
         }
+        s->cv.notify_all();
     }
 
-    void set_stopped() noexcept { promise_->set_value(std::nullopt); }
+    void set_stopped() noexcept {
+        auto s = state_;
+        {
+            std::unique_lock<boost::fibers::mutex> lk{s->mtx};
+            s->done = true; // value stays nullopt
+        }
+        s->cv.notify_all();
+    }
 
     [[nodiscard]] stdexec::env<> get_env() const noexcept { return {}; }
 };
@@ -60,7 +93,7 @@ template <class ValueTuple> struct sync_wait_receiver {
 /// so other fibers can continue running.
 ///
 /// The sender may complete on any thread; the calling fiber is woken via
-/// Boost.Fiber's cross-thread promise/future mechanism.
+/// Boost.Fiber's cross-thread mutex/condition_variable mechanism.
 ///
 /// @returns `std::optional<std::tuple<value_types...>>`:
 ///   - An engaged tuple on `set_value`.
@@ -75,17 +108,24 @@ template <stdexec::sender Sender> auto fiber_sync_wait(Sender&& sender) {
     }
 
     using value_tuple_t = stdexec::value_types_of_t<Sender, stdexec::env<>, std::tuple, std::type_identity_t>;
+    using state_t = detail::fiber_sync_state<value_tuple_t>;
 
-    boost::fibers::promise<std::optional<value_tuple_t>> promise;
-    auto future = promise.get_future();
+    auto state = std::make_shared<state_t>();
 
-    // op and the receiver inside it hold a pointer to promise. All three live
-    // on this fiber's stack; the stack is preserved while the fiber is
-    // suspended, so the pointer remains valid until future.get() returns.
-    auto op = stdexec::connect(std::forward<Sender>(sender), detail::sync_wait_receiver<value_tuple_t>{&promise});
+    // op lives on the fiber's stack, which Boost.Fiber preserves while this
+    // fiber is suspended in cv.wait below.
+    auto op = stdexec::connect(std::forward<Sender>(sender), detail::sync_wait_receiver<value_tuple_t>{state});
     stdexec::start(op);
 
-    return future.get(); // suspends this fiber; OS thread runs other fibers
+    {
+        std::unique_lock<boost::fibers::mutex> lk{state->mtx};
+        state->cv.wait(lk, [&] { return state->done; });
+    } // mutex released here; op and state may now be safely destroyed
+
+    if (state->error) {
+        std::rethrow_exception(std::move(state->error));
+    }
+    return std::move(state->value);
 }
 
 } // namespace fiberexec

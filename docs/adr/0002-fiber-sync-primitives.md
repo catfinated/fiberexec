@@ -45,12 +45,16 @@ fiber on the *same* thread to make progress, the result is deadlock.
 
 #### Design
 
-`fiber_sync_wait` uses `boost::fibers::promise` / `boost::fibers::future`
-as the bridge between the sender's completion and the calling fiber. The
-fiber calls `future.get()` which suspends the fiber (not the thread),
-returning control to the scheduler. When the sender completes — from any
-thread — it sets the promise, Boost.Fiber wakes the suspended fiber, and
-the scheduler resumes it on its next pass.
+`fiber_sync_wait` bridges the sender's completion and the calling fiber
+using a heap-allocated `fiber_sync_state` struct (mutex, condition variable,
+result value, exception pointer, done flag) shared via `shared_ptr` between
+the waiter and the `sync_wait_receiver`.
+
+The fiber calls `boost::fibers::condition_variable::wait()` which suspends
+the fiber (not the thread), returning control to the scheduler. When the
+sender completes — from any thread — the receiver sets the result under the
+mutex, marks `done`, and calls `cv.notify_all()`. Boost.Fiber wakes the
+suspended fiber, and the scheduler resumes it on its next pass.
 
 Cross-thread wakeup works because our `io_uring_scheduler::awakened()` is
 protected by a mutex and `notify()` writes to the per-thread `notify_fd`,
@@ -61,6 +65,38 @@ where `value_tuple` is `std::tuple<value_types...>`. Returns `std::nullopt`
 if the sender completed with `set_stopped`.
 
 `set_error` completions rethrow the stored exception into the calling fiber.
+
+#### Why the sync state is heap-allocated
+
+P2300 senders ordinarily make no heap allocations, and `stdexec::sync_wait`
+upholds that by putting its sync state (mutex, condvar, result) on the
+calling OS thread's stack. It can do this safely because blocking the OS
+thread keeps the stack frame alive for the full duration of the wait —
+including the `cv.notify_all()` call on the completing thread. The two
+threads reach `notify_all-returns` and `stack-unwind` in strict sequence.
+
+`fiber_sync_wait` cannot block the OS thread — that would starve every other
+fiber sharing it. Instead it suspends the fiber cooperatively and frees the
+thread to run other fibers. This introduces a race that `stdexec::sync_wait`
+never faces: when the completing thread calls `cv.notify_all()`, the woken
+fiber can resume on a *different* OS thread and destroy the operation state
+(including the receiver and any stack-allocated sync state) *before*
+`notify_all()` returns.
+
+`std::condition_variable` is immune because its underlying `FUTEX_WAKE`
+syscall is atomic: the kernel records the wakeup and returns without further
+access to the condvar's memory. Boost.Fiber's `condition_variable` is not —
+it traverses a **user-space intrusive linked list** of waiting fiber contexts.
+If the list or its nodes are freed mid-traversal (because the woken fiber
+already ran and destroyed them), the traversal reads freed memory and crashes.
+
+The fix is to allocate the sync state on the heap and share it via
+`shared_ptr`. Each completion method (`set_value`, `set_error`, `set_stopped`)
+copies the `shared_ptr` into a local variable at entry, keeping the state
+alive through the `notify_all()` call regardless of what the outer fiber
+destroys concurrently. The allocation is a one-per-`fiber_sync_wait`-call
+overhead, not per-item, and only occurs on the rare call sites where a fiber
+needs to fan out and collect results.
 
 #### Constraints
 
@@ -77,12 +113,11 @@ if the sender completed with `set_stopped`.
 
 This ADR originally planned thin wrappers over `boost::fibers::mutex` and
 `boost::fibers::condition_variable` to keep Boost.Fiber out of public headers.
-This rationale no longer holds: `fiber_sync_wait.hpp` already includes
-`<boost/fiber/future.hpp>` in the public API because the template
-implementation requires the full `boost::fibers::promise` and
-`boost::fibers::future` types at instantiation time. The "keep Boost private"
-goal is already compromised, and adding wrapper types provides little
-value to the project.
+This rationale no longer holds: `fiber_sync_wait.hpp` includes
+`<boost/fiber/mutex.hpp>` and `<boost/fiber/condition_variable.hpp>` in the
+public API because the template implementation requires the full types at
+instantiation time. The "keep Boost private" goal is already compromised, and
+adding wrapper types provides little value to the project.
 
 The remaining arguments for wrapping are:
 
@@ -130,6 +165,11 @@ Deferred until mutex/condvar are in place.
   `stdexec::sync_wait`) from a fiberexec fiber is a latent bug. Users should
   use `boost::fibers::mutex`, `boost::fibers::condition_variable`, and
   `fiberexec::fiber_sync_wait` instead. This should be prominently documented.
-- `fiber_sync_wait.hpp` exposes `<boost/fiber/future.hpp>` as a public
-  dependency. Boost.Fiber is therefore a visible part of the fiberexec API,
-  not purely an implementation detail.
+- `fiber_sync_wait.hpp` exposes `<boost/fiber/mutex.hpp>` and
+  `<boost/fiber/condition_variable.hpp>` as public dependencies. Boost.Fiber
+  is therefore a visible part of the fiberexec API, not purely an
+  implementation detail.
+- `fiber_sync_wait` performs one heap allocation per call (the shared sync
+  state). This is unavoidable given Boost.Fiber's user-space condvar
+  traversal and the requirement not to block the OS thread; see the design
+  section above for the full rationale.
