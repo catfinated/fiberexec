@@ -31,14 +31,17 @@ Three options are sketched in ADR-0001:
 
 Options A and B use the same underlying machinery; B is preferred.
 
-### ADR-0002 steps 2 & 3 — fiber sync primitives
+### ADR-0002 step 3 — `fiber_channel<T>`
 
-- **`fiber_mutex`** + **`fiber_condition_variable`**: thin wrappers over
-  `boost::fibers::mutex` / `boost::fibers::condition_variable` to keep Boost
-  out of public headers. Straightforward to implement.
-- **`fiber_channel<T>`**: bounded MPMC channel; builds on mutex/condvar.
-  Enables structured producer/consumer pipelines within the fiber pool.
-  `boost::fibers::buffered_channel<T>` is the likely backing type.
+`fiber_mutex` and `fiber_condition_variable` wrappers were dropped (see
+ADR-0002): `fiber_sync_wait.hpp` already exposes `<boost/fiber/future.hpp>`
+publicly, so Boost.Fiber is already in public headers. Users can use 
+`boost::fibers::mutex` / `boost::fibers::condition_variable` directly.
+
+- **`fiber_channel<T>`**: bounded MPMC channel using
+  `boost::fibers::buffered_channel<T>`. Enables structured producer/consumer
+  pipelines within the fiber pool. Still worth adding as a named fiberexec
+  type since it's a higher-level abstraction, not just a rename.
 
 ---
 

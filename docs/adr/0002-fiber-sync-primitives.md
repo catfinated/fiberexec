@@ -1,6 +1,6 @@
 # ADR-0002: Fiber-aware synchronization primitives
 
-**Status**: Partially implemented (`fiber_sync_wait` done; mutex/condvar/channel deferred)
+**Status**: Partially implemented (`fiber_sync_wait` done; mutex/condvar dropped; channel deferred)
 
 ## Context
 
@@ -73,52 +73,32 @@ if the sender completed with `set_stopped`.
 
 ---
 
-### `fiber_mutex` — cooperative mutex
+### `fiber_mutex` and `fiber_condition_variable` — dropped
 
-A mutex that suspends the waiting fiber instead of blocking the OS thread.
-Equivalent to `boost::fibers::mutex`.
+This ADR originally planned thin wrappers over `boost::fibers::mutex` and
+`boost::fibers::condition_variable` to keep Boost.Fiber out of public headers.
+This rationale no longer holds: `fiber_sync_wait.hpp` already includes
+`<boost/fiber/future.hpp>` in the public API because the template
+implementation requires the full `boost::fibers::promise` and
+`boost::fibers::future` types at instantiation time. The "keep Boost private"
+goal is already compromised, and adding wrapper types provides little
+value to the project.
 
-#### Design options
+The remaining arguments for wrapping are:
 
-**Option A — alias `boost::fibers::mutex` directly**
+- namespace consistency 
+- theoretical future-proofing against a fiber runtime swap
 
-```cpp
-using fiber_mutex = boost::fibers::mutex;
-```
+Neither make the juice worth the squeeze. 
+A fiber runtime swap would require rewriting `fiber_sync_wait`, the
+scheduler, and essentially everything else; the wrappers would not meaningfully
+reduce the cost.
 
-Zero implementation cost; callers get the full Boost.Fiber mutex API. The
-downside is that the Boost.Fiber header becomes a transitive public dependency.
-
-**Option B — thin wrapper**
-
-```cpp
-class fiber_mutex {
-    boost::fibers::mutex impl_;
-public:
-    void lock();
-    bool try_lock();
-    void unlock();
-};
-```
-
-Hides the Boost.Fiber header from public consumers; the type name is in
-the fiberexec namespace. Minimal extra code.
-
-**Recommendation**: Option B. Boost.Fiber should remain an implementation
-detail; exposing `boost::fibers::mutex` directly forces all fiberexec users
-to depend on Boost headers.
-
----
-
-### `fiber_condition_variable` — cooperative condition variable
-
-A condition variable that suspends the waiting fiber instead of the thread.
-Natural companion to `fiber_mutex`.
-
-#### Design
-
-Same wrapper pattern as `fiber_mutex` over `boost::fibers::condition_variable`.
-Exposes `wait`, `wait_for`, `wait_until`, `notify_one`, `notify_all`.
+**Decision**: do not implement `fiber_mutex` or `fiber_condition_variable`.
+Users should use `boost::fibers::mutex` and `boost::fibers::condition_variable`
+directly. This should be documented in the public API docs as the correct
+alternative to `std::mutex` and `std::condition_variable` inside fiberexec
+fibers.
 
 ---
 
@@ -140,19 +120,16 @@ Deferred until mutex/condvar are in place.
 
 1. ✅ `fiber_sync_wait` — highest leverage; unblocks the README example and
    makes sender fan-out composable from inside fibers.
-2. ⏳ `fiber_mutex` + `fiber_condition_variable` — prerequisite for
-   `fiber_channel` and for any fiber code that needs shared mutable state.
-3. ⏳ `fiber_channel<T>` — builds on mutex/condvar; enables structured
-   producer/consumer patterns.
+2. ~~`fiber_mutex` + `fiber_condition_variable`~~ — dropped; see above.
+3. ⏳ `fiber_channel<T>` — wraps `boost::fibers::buffered_channel<T>`;
+   enables structured producer/consumer patterns.
 
 ## Consequences
 
-- Calling any OS-thread-blocking primitive from a fiberexec fiber is a
-  latent bug. These primitives are the correct replacements and should be
-  documented as such.
-- `fiber_sync_wait` introduces a dependency on `boost::fibers::promise` and
-  `boost::fibers::future` in the public-facing implementation (though not in
-  the public header — Boost.Fiber types live in the `.cpp`).
-- `fiber_mutex` and `fiber_condition_variable` wrappers keep Boost.Fiber out
-  of public headers, which is consistent with how `fiber_pool` and the
-  scheduler are hidden today.
+- Calling any OS-thread-blocking primitive (`std::mutex`, `std::future`,
+  `stdexec::sync_wait`) from a fiberexec fiber is a latent bug. Users should
+  use `boost::fibers::mutex`, `boost::fibers::condition_variable`, and
+  `fiberexec::fiber_sync_wait` instead. This should be prominently documented.
+- `fiber_sync_wait.hpp` exposes `<boost/fiber/future.hpp>` as a public
+  dependency. Boost.Fiber is therefore a visible part of the fiberexec API,
+  not purely an implementation detail.
