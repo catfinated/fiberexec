@@ -3,6 +3,7 @@
     "boost-fiber",
     "boost-context",
     "liburing",
-    "catch2"
+    "catch2",
+    "benchmark"
   ]
 }

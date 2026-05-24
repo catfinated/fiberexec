@@ -22,3 +22,8 @@ pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
 if(FIBEREXEC_BUILD_TESTS)
   find_package(Catch2 3 CONFIG REQUIRED)
 endif()
+
+# Google Benchmark — provided by vcpkg
+if(FIBEREXEC_BUILD_BENCHMARKS)
+  find_package(benchmark CONFIG REQUIRED)
+endif()

@@ -76,6 +76,17 @@
                 "CMAKE_EXE_LINKER_FLAGS": "-fprofile-instr-generate",
                 "CMAKE_SHARED_LINKER_FLAGS": "-fprofile-instr-generate"
             }
+        },
+        {
+            "name": "benchmark",
+            "inherits": "release",
+            "displayName": "Release+Benchmarks",
+            "binaryDir": "${sourceDir}/build/benchmark",
+            "cacheVariables": {
+                "FIBEREXEC_BUILD_BENCHMARKS": "ON",
+                "FIBEREXEC_BUILD_TESTS": "OFF",
+                "FIBEREXEC_BUILD_EXAMPLES": "OFF"
+            }
         }
     ],
     "buildPresets": [
@@ -98,6 +109,10 @@
         {
             "name": "coverage",
             "configurePreset": "coverage"
+        },
+        {
+            "name": "benchmark",
+            "configurePreset": "benchmark"
         }
     ],
     "testPresets": [

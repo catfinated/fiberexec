@@ -192,6 +192,61 @@ scenario 1 (data arrives):  hello from writer
 scenario 2 (timeout fires): (timed out)
 ```
 
+## Benchmarks
+
+### Building
+
+Benchmarks are excluded from the default build. Use the `benchmark` preset,
+which enables `-O3` and turns off tests and examples:
+
+```sh
+cmake --preset benchmark
+cmake --build build/benchmark --target bench_scheduler
+```
+
+### Running
+
+```sh
+./build/benchmark/benchmarks/bench_scheduler
+```
+
+Pass `--benchmark_repetitions=N` to collect multiple runs and report mean /
+median / stddev. Pin the process to a core and disable CPU frequency scaling
+for stable numbers:
+
+```sh
+# disable scaling (requires root)
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+./build/benchmark/benchmarks/bench_scheduler \
+    --benchmark_repetitions=5 \
+    --benchmark_report_aggregates_only=true
+```
+
+### Scheduler microbenchmarks (`bench_scheduler`)
+
+Measured on an AMD Ryzen 7 5700X (8-core, 16 logical, ~4.7 GHz), Linux
+6.x, Clang, `-O3`. All benchmarks use `UseRealTime()` — fiber work runs on
+pool threads while the benchmark thread sleeps in `sync_wait`, so wall time
+is the only meaningful measure.
+
+| Benchmark | Wall time / iter | Throughput |
+|-----------|-----------------|------------|
+| Fiber context switch (2 fibers, 10 000 round-trips) | ~1.09 ms | ~18.3 M switches/s · **~54 ns/switch** |
+| Thread context switch (semaphore ping-pong, 10 000 round-trips) | ~3.87 ms | ~5.2 M switches/s · **~193 ns/switch** |
+| `run(sched, noop)` round-trip | **~6.6 µs** | — |
+| `schedule(sched) \| then(noop)` round-trip | **~6.6 µs** | — |
+
+**Fiber vs thread context switch**: fiber switches are ~3.6× faster than a
+semaphore-gated thread ping-pong (~54 ns vs ~193 ns per switch). Both
+measurements count two switches per "item" (A→B and B→A), so the raw
+switch latency is half the per-item figure.
+
+**Schedule overhead**: a full `run(sched, fn)` round-trip — enqueue task,
+pool thread picks it up, fiber switch, execute noop, set_value, sync_wait
+unblocks — costs ~6.6 µs. `schedule | then` is within noise of `run`,
+confirming the extra receiver machinery in `run` adds nothing measurable.
+
 ## Status
 
 This is a research project and learning exercise. It is not production-ready.

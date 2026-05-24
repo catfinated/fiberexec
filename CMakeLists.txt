@@ -23,8 +23,9 @@ if(NOT LINUX)
   message(FATAL_ERROR "fiberexec requires Linux (io_uring)")
 endif()
 
-option(FIBEREXEC_BUILD_TESTS    "Build test suite" ON)
-option(FIBEREXEC_BUILD_EXAMPLES "Build examples"   ON)
+option(FIBEREXEC_BUILD_TESTS      "Build test suite"                         ON)
+option(FIBEREXEC_BUILD_EXAMPLES   "Build examples"                           ON)
+option(FIBEREXEC_BUILD_BENCHMARKS "Build benchmarks (requires Google Benchmark)" OFF)
 
 include(cmake/Dependencies.cmake)
 
@@ -37,4 +38,8 @@ endif()
 
 if(FIBEREXEC_BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+if(FIBEREXEC_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()
