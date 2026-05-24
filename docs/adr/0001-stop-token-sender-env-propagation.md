@@ -1,6 +1,6 @@
 # ADR-0001: Stop-token propagation through the sender environment
 
-**Status**: Implemented (step 4 — set_stopped_t mapping — deferred)
+**Status**: Fully implemented
 
 ## Context
 
@@ -129,11 +129,22 @@ template <class Receiver> struct operation {
 With this change, any fiber launched via `schedule(sched)` automatically
 inherits the stop token from its sender chain without any change to user code.
 
-### 4. ECANCELED → set_stopped mapping (deferred)
+### 4. ECANCELED → set_stopped mapping
 
 The sender must advertise `set_stopped_t()` as a completion signature and
-actually deliver it when a fiber's I/O is cancelled. This step is deferred
-because the mapping strategy is non-trivial.
+actually deliver it when a fiber's I/O is cancelled.
+
+**Implemented as Option B** (`fiberexec::run`). See `include/fiberexec/run.hpp`.
+`run(sched, fn)` combines scheduling, stop-token installation, and the
+ECANCELED → `set_stopped` mapping in a single sender. Users replace
+`stdexec::schedule(sched) | stdexec::then(fn)` with `fiberexec::run(sched, fn)`
+to get correct cancellation semantics. `set_stopped` then composes naturally
+with standard algorithms: `stdexec::upon_stopped` for inline fallbacks,
+`stdexec::let_stopped` for sender-returning handlers, and
+`stdexec::stopped_as_optional` to fold the stopped path into an `optional`.
+See `examples/cancellation.cpp` for a worked example.
+
+The following analysis is preserved for context.
 
 #### Who actually needs this today
 
@@ -300,8 +311,9 @@ of the same machinery as `fiber_then`.
    fiber-local token — purely additive, does not break callers.
 3. ✅ Update `operation::start()` to install the bridged stop token before
    invoking `set_value`.
-4. ⏳ Add `set_stopped_t()` to completion signatures and decide on the
-   ECANCELED → set_stopped mapping strategy (deferred).
+4. ✅ Implement `fiberexec::run(sched, fn)` — schedules onto the pool, installs
+   the bridged stop token, runs `fn`, and maps ECANCELED → `set_stopped`.
+   Option B from the analysis below was chosen; see `include/fiberexec/run.hpp`.
 5. ✅ Write tests that exercise the full chain: `when_all` error propagation
    cancelling a blocked `async_read` with no explicit stop token.
 
@@ -312,9 +324,10 @@ of the same machinery as `fiber_then`.
 - Fibers launched via `schedule(sched) | then(lambda)` automatically cancel
   their in-flight I/O when the sender graph is cancelled — no explicit stop
   token threading required.
-- The `set_stopped_t` completion signature change may affect downstream
-  `when_all` / `sync_wait` behavior: callers must be prepared for a stopped
-  outcome, not just value/error.
+- `fiberexec::run` advertises `set_stopped_t()` in its completion signatures.
+  Callers that pipe `run` into algorithms expecting only value/error must handle
+  or propagate the stopped path. Standard algorithms such as `upon_stopped`,
+  `let_stopped`, and `stopped_as_optional` compose directly with `run`.
 - `fiber_specific_ptr` involves a heap allocation per fiber that uses a stop
   token. For fibers that never call async ops this is wasted; evaluate whether
   lazy initialisation (only install if the token is stoppable) is worth it.

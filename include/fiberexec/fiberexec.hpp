@@ -10,3 +10,4 @@
 #include <fiberexec/async_io.hpp>
 #include <fiberexec/fiber_context.hpp>
 #include <fiberexec/fiber_sync_wait.hpp>
+#include <fiberexec/run.hpp>

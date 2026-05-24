@@ -148,6 +148,9 @@ public:
         /// Two schedulers are equal iff they refer to the same `fiber_context`.
         bool operator==(scheduler const&) const noexcept = default;
 
+        /// Access the owning context (used by `fiberexec::run`).
+        [[nodiscard]] fiber_context& context() const noexcept { return *ctx_; }
+
     private:
         friend class fiber_context;
         explicit scheduler(fiber_context* ctx) noexcept

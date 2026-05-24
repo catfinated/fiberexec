@@ -53,15 +53,54 @@ auto work = schedule(sched)
           | then([] { /* ... */ });
 ```
 
-With fiberexec, the `then` lambda runs on a fiber, so you can call what looks like a blocking API that actually yields the fiber under the hood. Sequential I/O becomes straight-line code:
+With fiberexec, the `then` lambda runs on a fiber, so you can call what looks like a blocking API that actually yields the fiber under the hood. Sequential I/O becomes straight-line code inside a fiber. fiberexec provides three ways to schedule work on the pool:
+
+**`schedule | then` — familiar, not recommended**
+
+The most familiar pattern for stdexec users, but cancelled I/O surfaces as
+`set_error(ECANCELED)` rather than `set_stopped`, so `upon_stopped` and
+`let_stopped` won't fire on cancellation:
 
 ```cpp
 auto work = stdexec::schedule(sched) | stdexec::then([&] {
     auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
-    auto parsed = parse(std::string_view{buf, static_cast<std::size_t>(n)});
-    auto response = handle(parsed);
-    fiberexec::async_write(client_fd, response.data(), response.size());
+    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
 });
+```
+
+**`fiberexec::run(sched, fn)` — recommended**
+
+The canonical fiber entry point (`run` installs the receiver's stop token as
+the fiber-local stop token and maps `ECANCELED` → `set_stopped`, completing
+the stdexec cancellation signal loop):
+
+```cpp
+auto work = fiberexec::run(sched, [&] {
+    auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
+    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
+});
+```
+
+**`stdexec::schedule(sched) | fiberexec::run(fn)` — pipe form**
+
+Identical semantics to `run(sched, fn)` with the familiar stdexec pipe syntax:
+
+```cpp
+auto work = stdexec::schedule(sched) | fiberexec::run([&] {
+    auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
+    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
+});
+```
+
+Because `run` sends `set_stopped` on cancellation, it composes directly with
+`upon_stopped` and `let_stopped`:
+
+```cpp
+auto result = fiberexec::run(sched, [rfd, tok = ss.get_token()] {
+    std::array<char, 64> buf{};
+    auto n = fiberexec::async_read(rfd, buf.data(), buf.size(), tok);
+    return std::string(buf.data(), static_cast<std::size_t>(n));
+}) | stdexec::upon_stopped([] { return std::string{"(timed out)"}; });
 ```
 
 No intermediate senders, no continuation chains. Just sequential code that happens to be async underneath. The sender/receiver layer gets you onto the fiber pool and collects the result; once inside the fiber, you write normal code.
@@ -69,7 +108,7 @@ No intermediate senders, no continuation chains. Just sequential code that happe
 The two models complement each other. When you need structured concurrency, you drop back into senders. `fiberexec::fiber_sync_wait` lets you await a sender graph from inside a fiber without blocking the OS thread — only the calling fiber suspends:
 
 ```cpp
-auto work = stdexec::schedule(sched) | stdexec::then([&] {
+auto work = fiberexec::run(sched, [&] {
     // Sequential setup — just normal code
     auto n = fiberexec::async_read(config_fd, buf, sizeof(buf));
     auto endpoints = parse_endpoints(std::string_view{buf, static_cast<std::size_t>(n)});
@@ -77,9 +116,9 @@ auto work = stdexec::schedule(sched) | stdexec::then([&] {
     // Fan-out — use senders for concurrency; fiber_sync_wait suspends this
     // fiber (not the OS thread) while the inner senders run
     auto [a, b, c] = *fiberexec::fiber_sync_wait(stdexec::when_all(
-        stdexec::schedule(sched) | stdexec::then([&] { return fetch(endpoints[0]); }),
-        stdexec::schedule(sched) | stdexec::then([&] { return fetch(endpoints[1]); }),
-        stdexec::schedule(sched) | stdexec::then([&] { return fetch(endpoints[2]); })
+        fiberexec::run(sched, [&] { return fetch(endpoints[0]); }),
+        fiberexec::run(sched, [&] { return fetch(endpoints[1]); }),
+        fiberexec::run(sched, [&] { return fetch(endpoints[2]); })
     ));
 
     return merge(a, b, c);
@@ -130,6 +169,7 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/hello_fiber
 ./build/debug/examples/async_pipeline
 ./build/debug/examples/echo_server
+./build/debug/examples/cancellation
 ```
 
 `echo_server` starts a TCP server on loopback, fans out three concurrent
@@ -141,6 +181,15 @@ Echo server listening on 127.0.0.1:PORT
 [client 1] echo: "hello from client 1"
 ...
 Done.
+```
+
+`cancellation` demonstrates `fiberexec::run` + `stdexec::upon_stopped`. A
+reader fiber tries to read from a pipe before a deadline; a timer fiber signals
+cancellation if the deadline expires. Output:
+
+```
+scenario 1 (data arrives):  hello from writer
+scenario 2 (timeout fires): (timed out)
 ```
 
 ## Status

@@ -6,3 +6,6 @@ target_link_libraries(async_pipeline PRIVATE fiberexec::fiberexec)
 
 add_executable(echo_server echo_server.cpp)
 target_link_libraries(echo_server PRIVATE fiberexec::fiberexec)
+
+add_executable(cancellation cancellation.cpp)
+target_link_libraries(cancellation PRIVATE fiberexec::fiberexec)

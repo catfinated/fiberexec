@@ -10,26 +10,10 @@ investigating.
 
 These are concrete items with designs already sketched in the ADRs.
 
-### ADR-0001 step 4 — ECANCELED → `set_stopped` mapping
+### ~~ADR-0001 step 4 — ECANCELED → `set_stopped` mapping~~ ✅ done
 
-The async ops throw `std::system_error(ECANCELED)` on cancellation, but that
-surfaces as `set_error`, not `set_stopped`. Most users are not blocked by this
-today (see ADR-0001 for why), but algorithms that branch on `set_stopped` (e.g.
-`let_stopped`, or a `sync_wait` caller distinguishing cancel from success) will
-see the wrong completion.
-
-Three options are sketched in ADR-0001:
-
-- **Option A** — `fiberexec::fiber_then(fn)`: custom drop-in for `stdexec::then`
-  that catches ECANCELED and calls `set_stopped` instead.
-- **Option B** — `fiberexec::run(sched, fn)`: single compound sender that
-  schedules, installs the stop token, runs `fn`, and maps ECANCELED to
-  `set_stopped`. Cleanest long-term API.
-- **Option C** — `fiberexec::map_cancelled_to_stopped(sender)`: outer wrapper
-  applied at the composition site; least invasive but most boilerplate at call
-  sites.
-
-Options A and B use the same underlying machinery; B is preferred.
+Implemented as `fiberexec::run(sched, fn)` (Option B from ADR-0001).
+See `include/fiberexec/run.hpp` and `examples/cancellation.cpp`.
 
 ### ADR-0002 step 3 — `fiber_channel<T>`
 
