@@ -9,3 +9,4 @@ function(add_bench name)
 endfunction()
 
 add_bench(bench_scheduler bench_scheduler.cpp)
+add_bench(bench_echo bench_echo.cpp)

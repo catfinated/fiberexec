@@ -201,13 +201,14 @@ which enables `-O3` and turns off tests and examples:
 
 ```sh
 cmake --preset benchmark
-cmake --build build/benchmark --target bench_scheduler
+cmake --build build/benchmark --target bench_scheduler bench_echo
 ```
 
 ### Running
 
 ```sh
 ./build/benchmark/benchmarks/bench_scheduler
+./build/benchmark/benchmarks/bench_echo
 ```
 
 Pass `--benchmark_repetitions=N` to collect multiple runs and report mean /
@@ -232,20 +233,58 @@ is the only meaningful measure.
 
 | Benchmark | Wall time / iter | Throughput |
 |-----------|-----------------|------------|
-| Fiber context switch (2 fibers, 10 000 round-trips) | ~1.09 ms | ~18.3 M switches/s · **~54 ns/switch** |
-| Thread context switch (semaphore ping-pong, 10 000 round-trips) | ~3.87 ms | ~5.2 M switches/s · **~193 ns/switch** |
-| `run(sched, noop)` round-trip | **~6.6 µs** | — |
-| `schedule(sched) \| then(noop)` round-trip | **~6.6 µs** | — |
+| Fiber context switch (2 fibers, 10 000 round-trips) | ~1.09 ms | ~18.4 M switches/s · **~54 ns/switch** |
+| Thread context switch (semaphore ping-pong, 10 000 round-trips) | ~3.32 ms | ~6.0 M switches/s · **~166 ns/switch** |
+| `run(sched, noop)` round-trip | **~6.5 µs** | — |
+| `schedule(sched) \| then(noop)` round-trip | **~6.5 µs** | — |
 
-**Fiber vs thread context switch**: fiber switches are ~3.6× faster than a
-semaphore-gated thread ping-pong (~54 ns vs ~193 ns per switch). Both
+**Fiber vs thread context switch**: fiber switches are ~3× faster than a
+semaphore-gated thread ping-pong (~54 ns vs ~166 ns per switch). Both
 measurements count two switches per "item" (A→B and B→A), so the raw
 switch latency is half the per-item figure.
 
 **Schedule overhead**: a full `run(sched, fn)` round-trip — enqueue task,
 pool thread picks it up, fiber switch, execute noop, set_value, sync_wait
-unblocks — costs ~6.6 µs. `schedule | then` is within noise of `run`,
+unblocks — costs ~6.5 µs. `schedule | then` is within noise of `run`,
 confirming the extra receiver machinery in `run` adds nothing measurable.
+
+### Echo server benchmarks (`bench_echo`)
+
+Measured on the same machine. Each iteration opens N concurrent connections,
+each exchanging 100 round-trips of a 64-byte payload over loopback TCP.
+Clients are always OS threads with blocking syscalls; only the server side
+differs. Throughput is total round-trips per second across all connections.
+
+| Benchmark | Connections | Wall time / iter | Throughput |
+|-----------|-------------|-----------------|------------|
+| Fiber echo server | 1 | ~1.35 ms | ~73.9k round-trips/s |
+| Fiber echo server | 10 | ~2.37 ms | ~422k round-trips/s |
+| Fiber echo server | 100 | ~15.5 ms | ~645k round-trips/s |
+| Fiber echo server | 1000 | ~137 ms | ~732k round-trips/s |
+| Thread echo server | 1 | ~1.25 ms (median; high variance) | ~71.6k round-trips/s |
+| Thread echo server | 10 | ~3.93 ms | ~254k round-trips/s |
+| Thread echo server | 100 | ~16.7 ms | ~598k round-trips/s |
+| Thread echo server | 1000 | — (skipped; ~2000 OS threads) | — |
+
+**At 1 connection**, the two are roughly even (~74k vs ~72k round-trips/s), but
+the thread server shows very high variance (38% CV), suggesting thread
+creation and teardown noise at the single-connection scale.
+
+**At 10 and 100 connections**, the fiber server pulls ahead: 422k vs 254k
+round-trips/s at 10 connections (1.7×), and 645k vs 598k at 100 (1.08×). The
+thread server's overhead grows faster because each connection spawns a new OS
+thread with a full kernel stack, and those threads contend for scheduling
+on the same cores.
+
+**At 1000 connections**, only the fiber server is practical. It sustains ~732k
+round-trips/s on a fixed pool of 16 OS threads. The thread benchmark is capped
+at 100 connections because 1000 concurrent connections would require ~2000 OS
+threads (one per connection plus one per client), which exhausts per-process
+thread limits and wastes several GB of stack space.
+
+The fiber pool's OS thread count stays fixed at `hardware_concurrency()` (16
+here) regardless of connection count — that's the fundamental scalability
+advantage.
 
 ## Status
 
