@@ -1,0 +1,33 @@
+# ThreadSanitizer suppression file for fiberexec
+#
+# Two categories of false positives arise when running under TSan:
+#
+# 1. Boost.Fiber internal synchronization (spinlock_ttas, context init,
+#    operator delete via Boost.Fiber allocators).  These are correct TTAS
+#    spinlocks and reference-counted allocations, but Boost.Fiber is not
+#    compiled with -fsanitize=thread in the vcpkg build, so TSan cannot see
+#    the atomic acquire/release edges that establish ordering.
+#
+# 2. The io_uring eventfd shutdown path.  During pool teardown,
+#    shutdown_cv_.notify_all() calls schedule_from_remote() which calls
+#    io_uring_scheduler::notify() (::write to notify_fd_).  The
+#    happens-before between that write and the subsequent ::close(notify_fd_)
+#    in the destructor flows through the kernel (io_uring CQE delivery of the
+#    eventfd read), which TSan cannot observe.  The ordering is correct at
+#    runtime: the thread processes the wakeup CQE and exits before its
+#    scheduler is destroyed; the join() in ~fiber_pool() then provides the
+#    final TSan-visible edge.
+
+# Boost.Fiber TTAS spinlock — not instrumented
+race:boost::fibers::detail::spinlock_ttas::lock
+
+# Boost.Fiber context initialisation — operator new through uninstrumented path
+race:boost::fibers::context_initializer::initialize
+
+# Boost.Fiber allocator teardown — operator delete through uninstrumented path
+race:boost::fibers::detail::default_stack_allocator
+
+# Shutdown eventfd path: notify() write and destructor close() are ordered
+# through the kernel io_uring CQE mechanism, invisible to TSan.
+race:fiberexec*io_uring_scheduler*notify
+race:fiberexec*io_uring_scheduler*~io_uring_scheduler

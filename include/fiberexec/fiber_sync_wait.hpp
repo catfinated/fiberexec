@@ -7,6 +7,7 @@
 #include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/mutex.hpp>
 
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -31,7 +32,11 @@ template <class ValueTuple> struct fiber_sync_state {
     boost::fibers::condition_variable cv;
     std::optional<ValueTuple> value; // engaged on set_value, empty on set_stopped
     std::exception_ptr error;        // set on set_error
-    bool done{false};
+    // Atomic with release/acquire: gives TSan a visible happens-before edge
+    // between the writer (set_value/set_error/set_stopped) and the predicate
+    // re-evaluation in cv.wait(), covering the reads of value/error that
+    // follow. boost::fibers::mutex is userspace and invisible to TSan.
+    std::atomic<bool> done{false};
 };
 
 template <class ValueTuple> struct sync_wait_receiver {
@@ -48,7 +53,7 @@ template <class ValueTuple> struct sync_wait_receiver {
             } catch (...) {
                 s->error = std::current_exception();
             }
-            s->done = true;
+            s->done.store(true, std::memory_order_release);
         }
         s->cv.notify_all();
     }
@@ -64,7 +69,7 @@ template <class ValueTuple> struct sync_wait_receiver {
             } else {
                 s->error = std::make_exception_ptr(std::forward<Error>(e));
             }
-            s->done = true;
+            s->done.store(true, std::memory_order_release);
         }
         s->cv.notify_all();
     }
@@ -73,7 +78,7 @@ template <class ValueTuple> struct sync_wait_receiver {
         auto s = state_;
         {
             std::unique_lock<boost::fibers::mutex> lk{s->mtx};
-            s->done = true; // value stays nullopt
+            s->done.store(true, std::memory_order_release); // value stays nullopt
         }
         s->cv.notify_all();
     }
@@ -119,7 +124,7 @@ template <stdexec::sender Sender> auto fiber_sync_wait(Sender&& sender) {
 
     {
         std::unique_lock<boost::fibers::mutex> lk{state->mtx};
-        state->cv.wait(lk, [&] { return state->done; });
+        state->cv.wait(lk, [&] { return state->done.load(std::memory_order_acquire); });
     } // mutex released here; op and state may now be safely destroyed
 
     if (state->error) {
