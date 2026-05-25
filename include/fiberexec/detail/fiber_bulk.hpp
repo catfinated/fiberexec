@@ -129,8 +129,8 @@ struct fiber_domain : stdexec::default_domain {
     template <class Sender, class Env>
         requires stdexec::__sender_for<Sender, stdexec::bulk_chunked_t>
     auto transform_sender(stdexec::set_value_t /*tag*/,
-                          Sender&& sndr,
-                          Env const& /*env*/) const noexcept { // NOLINT(cppcoreguidelines-missing-std-forward)
+                          Sender&& sndr, // NOLINT(cppcoreguidelines-missing-std-forward)
+                          Env const& /*env*/) const noexcept {
         auto& [tag, data, child] = sndr;
         auto [pol, shape, fun] = std::move(data);
         auto sched = stdexec::get_completion_scheduler<stdexec::set_value_t>(stdexec::get_env(child));
