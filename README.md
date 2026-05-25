@@ -160,6 +160,8 @@ auto work = fiberexec::run(sched, [&] {
 
 Fibers for sequential I/O flow, senders for structured concurrency and fan-out. The scheduler is the bridge between them.
 
+See `examples/sync_wait_fanout.cpp` for a self-contained demonstration.
+
 ### `stdexec::bulk` — parallel fan-out
 
 `fiberexec::scheduler` registers a `fiber_domain` that customizes `stdexec::bulk`. When you call `bulk` with `stdexec::par`, each index becomes a separate fiber dispatched across pool threads — all running concurrently, each able to do async I/O:
@@ -277,6 +279,7 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/echo_server
 ./build/debug/examples/cancellation
 ./build/debug/examples/parallel_gather
+./build/debug/examples/sync_wait_fanout
 ./build/debug/examples/channel_backpressure
 ./build/debug/examples/echo_server_pool
 ```
@@ -292,6 +295,24 @@ result[2] = 4
 ...
 result[15] = 225
 sum = 1240  (expected 1240)
+```
+
+`sync_wait_fanout` demonstrates `fiberexec::sync_wait` called from inside a
+fiber. Four producer fibers each write one integer after a different delay; a
+collector fiber fans out four concurrent `async_read` calls via
+`fiberexec::sync_wait(when_all(...))`. Only the collector fiber suspends — the
+OS thread stays free to run the producer fibers during the wait. Results arrive
+out of order but are collected in original order. Total runtime ≈ max(delay) =
+40 ms, not sum(delays) = 100 ms. Output looks like:
+
+```
+[+0ms] collector: submitting reads
+[+10ms] wrote 200
+[+20ms] wrote 400
+[+30ms] wrote 300
+[+40ms] wrote 100
+[+40ms] collected: 100 200 300 400
+sum = 1000  (expected 1000)
 ```
 
 `echo_server` starts a TCP server on loopback, fans out three concurrent

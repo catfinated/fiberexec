@@ -18,3 +18,6 @@ target_link_libraries(channel_backpressure PRIVATE fiberexec::fiberexec)
 
 add_executable(echo_server_pool echo_server_pool.cpp)
 target_link_libraries(echo_server_pool PRIVATE fiberexec::fiberexec)
+
+add_executable(sync_wait_fanout sync_wait_fanout.cpp)
+target_link_libraries(sync_wait_fanout PRIVATE fiberexec::fiberexec)
