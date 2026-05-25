@@ -8,7 +8,7 @@
 
 namespace fiberexec {
 
-/// Status returned by fiber_channel push and pop operations.
+/// Status returned by channel push and pop operations.
 enum class channel_op_status : std::uint8_t {
     success, ///< Operation completed successfully.
     empty,   ///< try_pop found the channel empty (non-blocking only).
@@ -30,17 +30,17 @@ enum class channel_op_status : std::uint8_t {
 /// all Boost.Fiber synchronization primitives.
 ///
 /// @tparam T  Value type.  Must be movable.
-template <class T> class fiber_channel {
+template <class T> class channel {
 public:
     /// Construct a channel with the given bounded @p capacity (must be > 0).
-    explicit fiber_channel(std::size_t capacity)
+    explicit channel(std::size_t capacity)
         : ch_(capacity) {}
 
-    ~fiber_channel() = default;
-    fiber_channel(fiber_channel const&) = delete;
-    fiber_channel& operator=(fiber_channel const&) = delete;
-    fiber_channel(fiber_channel&&) = delete;
-    fiber_channel& operator=(fiber_channel&&) = delete;
+    ~channel() = default;
+    channel(channel const&) = delete;
+    channel& operator=(channel const&) = delete;
+    channel(channel&&) = delete;
+    channel& operator=(channel&&) = delete;
 
     /// Blocking push.  Suspends the fiber if the channel is full.
     /// @returns success, or closed if the channel was closed.

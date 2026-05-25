@@ -60,7 +60,7 @@ int main() {
 
     std::printf("Echo server listening on 127.0.0.1:%d\n", ntohs(addr.sin_port));
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     // Server fiber: accept kClients connections one at a time, echo each message.

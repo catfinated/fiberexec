@@ -215,7 +215,7 @@ static void BM_FiberEchoServer(benchmark::State& state) {
 
     // Context is created once and reused across iterations to amortize
     // thread-pool and io_uring ring startup cost.
-    fiberexec::fiber_context ctx{std::thread::hardware_concurrency()};
+    fiberexec::context ctx{std::thread::hardware_concurrency()};
 
     for ([[maybe_unused]] auto _ : state) {
         int server_fd = make_server_socket();
@@ -419,7 +419,7 @@ BENCHMARK(BM_AsioExecEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealT
 // ---------------------------------------------------------------------------
 static void BM_FiberEchoMsgSize(benchmark::State& state) {
     auto const msg_size = static_cast<std::size_t>(state.range(0));
-    fiberexec::fiber_context ctx{std::thread::hardware_concurrency()};
+    fiberexec::context ctx{std::thread::hardware_concurrency()};
 
     for ([[maybe_unused]] auto _ : state) {
         int server_fd = make_server_socket();

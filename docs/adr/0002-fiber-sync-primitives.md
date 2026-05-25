@@ -1,6 +1,6 @@
 # ADR-0002: Fiber-aware synchronization primitives
 
-**Status**: Implemented (`fiber_sync_wait` done; mutex/condvar dropped; `fiber_channel<T>` done)
+**Status**: Implemented (`sync_wait` done; mutex/condvar dropped; `channel<T>` done)
 
 ## Context
 
@@ -20,7 +20,7 @@ These are the building blocks for all fiber-level synchronization in fiberexec.
 
 ## Primitives
 
-### `fiber_sync_wait(sender)` — await a sender from inside a fiber
+### `sync_wait(sender)` — await a sender from inside a fiber
 
 The primary motivation. Allows a fiber to fan out work as a sender graph and
 collect the result without blocking the OS thread:
@@ -31,7 +31,7 @@ schedule(sched) | then([&] {
         schedule(sched) | then([&] { return fiberexec::async_recv(a, ...); }),
         schedule(sched) | then([&] { return fiberexec::async_recv(b, ...); })
     );
-    auto [x, y] = fiberexec::fiber_sync_wait(std::move(reads));
+    auto [x, y] = fiberexec::sync_wait(std::move(reads));
     // ...
 });
 ```
@@ -45,7 +45,7 @@ fiber on the *same* thread to make progress, the result is deadlock.
 
 #### Design
 
-`fiber_sync_wait` bridges the sender's completion and the calling fiber
+`sync_wait` bridges the sender's completion and the calling fiber
 using a heap-allocated `fiber_sync_state` struct (mutex, condition variable,
 result value, exception pointer, done flag) shared via `shared_ptr` between
 the waiter and the `sync_wait_receiver`.
@@ -75,7 +75,7 @@ thread keeps the stack frame alive for the full duration of the wait —
 including the `cv.notify_all()` call on the completing thread. The two
 threads reach `notify_all-returns` and `stack-unwind` in strict sequence.
 
-`fiber_sync_wait` cannot block the OS thread — that would starve every other
+`sync_wait` cannot block the OS thread — that would starve every other
 fiber sharing it. Instead it suspends the fiber cooperatively and frees the
 thread to run other fibers. This introduces a race that `stdexec::sync_wait`
 never faces: when the completing thread calls `cv.notify_all()`, the woken
@@ -94,7 +94,7 @@ The fix is to allocate the sync state on the heap and share it via
 `shared_ptr`. Each completion method (`set_value`, `set_error`, `set_stopped`)
 copies the `shared_ptr` into a local variable at entry, keeping the state
 alive through the `notify_all()` call regardless of what the outer fiber
-destroys concurrently. The allocation is a one-per-`fiber_sync_wait`-call
+destroys concurrently. The allocation is a one-per-`sync_wait`-call
 overhead, not per-item, and only occurs on the rare call sites where a fiber
 needs to fan out and collect results.
 
@@ -113,7 +113,7 @@ needs to fan out and collect results.
 
 This ADR originally planned thin wrappers over `boost::fibers::mutex` and
 `boost::fibers::condition_variable` to keep Boost.Fiber out of public headers.
-This rationale no longer holds: `fiber_sync_wait.hpp` includes
+This rationale no longer holds: `sync_wait.hpp` includes
 `<boost/fiber/mutex.hpp>` and `<boost/fiber/condition_variable.hpp>` in the
 public API because the template implementation requires the full types at
 instantiation time. The "keep Boost private" goal is already compromised, and
@@ -125,7 +125,7 @@ The remaining arguments for wrapping are:
 - theoretical future-proofing against a fiber runtime swap
 
 Neither make the juice worth the squeeze. 
-A fiber runtime swap would require rewriting `fiber_sync_wait`, the
+A fiber runtime swap would require rewriting `sync_wait`, the
 scheduler, and essentially everything else; the wrappers would not meaningfully
 reduce the cost.
 
@@ -137,7 +137,7 @@ fibers.
 
 ---
 
-### `fiber_channel<T>` — bounded MPMC channel
+### `channel<T>` — bounded MPMC channel
 
 A bounded queue with fiber-aware blocking semantics: `push` suspends the
 producer fiber if the channel is full; `pop` suspends the consumer fiber if
@@ -161,7 +161,7 @@ between them.
 
 `boost::fibers::buffered_channel` requires capacity to be a power of two ≥ 2.
 The ring buffer keeps one slot empty as a sentinel, so effective usable
-capacity is `capacity − 1`. A channel constructed with `fiber_channel<T>{4}`
+capacity is `capacity − 1`. A channel constructed with `channel<T>{4}`
 holds at most 3 items before `push` blocks.
 
 #### Lifecycle
@@ -181,8 +181,8 @@ if (done.fetch_add(1, std::memory_order_acq_rel) == kProducers - 1) {
 
 #### Files
 
-- `include/fiberexec/fiber_channel.hpp` — implementation
-- `tests/test_fiber_channel.cpp` — unit tests (push/pop, try variants, close
+- `include/fiberexec/channel.hpp` — implementation
+- `tests/test_channel.cpp` — unit tests (push/pop, try variants, close
   lifecycle, MPMC correctness)
 - `examples/channel_backpressure.cpp` — fast producer / slow consumer
   demonstrating cooperative suspension under backpressure
@@ -191,10 +191,10 @@ if (done.fetch_add(1, std::memory_order_acq_rel) == kProducers - 1) {
 
 ## Implementation order
 
-1. ✅ `fiber_sync_wait` — highest leverage; unblocks the README example and
+1. ✅ `sync_wait` — highest leverage; unblocks the README example and
    makes sender fan-out composable from inside fibers.
 2. ~~`fiber_mutex` + `fiber_condition_variable`~~ — dropped; see above.
-3. ✅ `fiber_channel<T>` — wraps `boost::fibers::buffered_channel<T>`;
+3. ✅ `channel<T>` — wraps `boost::fibers::buffered_channel<T>`;
    enables structured producer/consumer patterns.
 
 ## Consequences
@@ -202,12 +202,12 @@ if (done.fetch_add(1, std::memory_order_acq_rel) == kProducers - 1) {
 - Calling any OS-thread-blocking primitive (`std::mutex`, `std::future`,
   `stdexec::sync_wait`) from a fiberexec fiber is a latent bug. Users should
   use `boost::fibers::mutex`, `boost::fibers::condition_variable`, and
-  `fiberexec::fiber_sync_wait` instead. This should be prominently documented.
-- `fiber_sync_wait.hpp` exposes `<boost/fiber/mutex.hpp>` and
+  `fiberexec::sync_wait` instead. This should be prominently documented.
+- `sync_wait.hpp` exposes `<boost/fiber/mutex.hpp>` and
   `<boost/fiber/condition_variable.hpp>` as public dependencies. Boost.Fiber
   is therefore a visible part of the fiberexec API, not purely an
   implementation detail.
-- `fiber_sync_wait` performs one heap allocation per call (the shared sync
+- `sync_wait` performs one heap allocation per call (the shared sync
   state). This is unavoidable given Boost.Fiber's user-space condvar
   traversal and the requirement not to block the OS thread; see the design
   section above for the full rationale.

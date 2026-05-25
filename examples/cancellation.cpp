@@ -32,7 +32,7 @@
 using namespace std::chrono_literals;
 
 int main() {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     // -------------------------------------------------------------------------

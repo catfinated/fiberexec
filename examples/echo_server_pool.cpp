@@ -15,9 +15,9 @@
 #include <string>
 #include <system_error>
 
-// Realistic TCP echo server: bounded worker pool via fiber_channel.
+// Realistic TCP echo server: bounded worker pool via channel.
 //
-// The accept loop and worker pool are decoupled by a fiber_channel<int> that
+// The accept loop and worker pool are decoupled by a channel<int> that
 // carries accepted file descriptors.  The channel capacity bounds how many
 // unhandled connections can queue up — if all workers are busy and the queue
 // is full, the accept loop suspends cooperatively on push() until a worker
@@ -25,7 +25,7 @@
 //
 //   accept loop  ──async_accept──▶  push(fd)
 //                                      │
-//                              fiber_channel<int>   ← bounded queue
+//                              channel<int>   ← bounded queue
 //                                      │
 //                                   pop(fd)
 //                           ┌──────────┴──────────┐
@@ -92,13 +92,13 @@ int main() {
     sockaddr_in const addr = bound_addr(server_fd);
     std::printf("listening on 127.0.0.1:%d  (%d workers, %d clients)\n", ntohs(addr.sin_port), kWorkers, kClients);
 
-    fiberexec::fiber_context ctx{4};
+    fiberexec::context ctx{4};
     auto sched = ctx.get_scheduler();
 
     // Bounded connection queue: capacity 8 → 7 usable slots.
     // With kWorkers=4 handling connections and kClients=8 arriving, up to
     // 3 connections will queue while all workers are busy.
-    fiberexec::fiber_channel<int> conn_ch{8};
+    fiberexec::channel<int> conn_ch{8};
     std::stop_source ss;
     std::atomic<int> clients_done{0};
 

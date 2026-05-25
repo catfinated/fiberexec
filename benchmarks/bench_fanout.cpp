@@ -53,7 +53,7 @@ static void fill_pairs(const std::vector<std::array<int, 2>>& pairs) {
 
 static void BM_FiberFanOut(benchmark::State& state) {
     const int n = static_cast<int>(state.range(0));
-    fiberexec::fiber_context ctx{4};
+    fiberexec::context ctx{4};
     auto sched = ctx.get_scheduler();
 
     auto pairs = make_pairs(n);

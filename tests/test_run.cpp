@@ -14,7 +14,7 @@
 #include <system_error>
 
 TEST_CASE("run executes a void callable and sends set_value", "[run]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool ran = false;
 
@@ -24,7 +24,7 @@ TEST_CASE("run executes a void callable and sends set_value", "[run]") {
 }
 
 TEST_CASE("run returns callable result via set_value", "[run]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     auto result = stdexec::sync_wait(fiberexec::run(sched, [] { return 42; }));
@@ -35,7 +35,7 @@ TEST_CASE("run returns callable result via set_value", "[run]") {
 }
 
 TEST_CASE("run propagates non-ECANCELED exception as set_error", "[run]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool threw = false;
 
@@ -49,7 +49,7 @@ TEST_CASE("run propagates non-ECANCELED exception as set_error", "[run]") {
 }
 
 TEST_CASE("run maps ECANCELED system_error to set_stopped", "[run]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     // set_stopped causes sync_wait to return nullopt.
@@ -65,7 +65,7 @@ TEST_CASE("run maps async_read cancellation to set_stopped", "[run][cancellation
     // maps that to set_stopped. when_all then propagates the trigger's
     // set_error as the overall result.
     using namespace std::chrono_literals;
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::array<int, 2> pipefd{};
@@ -105,7 +105,7 @@ TEST_CASE("run maps async_read cancellation to set_stopped", "[run][cancellation
 // ---------------------------------------------------------------------------
 
 TEST_CASE("pipe run executes a void callable and sends set_value", "[run][pipe]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool ran = false;
 
@@ -115,7 +115,7 @@ TEST_CASE("pipe run executes a void callable and sends set_value", "[run][pipe]"
 }
 
 TEST_CASE("pipe run returns callable result via set_value", "[run][pipe]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     auto result = stdexec::sync_wait(stdexec::schedule(sched) | fiberexec::run([] { return 42; }));
@@ -126,7 +126,7 @@ TEST_CASE("pipe run returns callable result via set_value", "[run][pipe]") {
 }
 
 TEST_CASE("pipe run maps ECANCELED system_error to set_stopped", "[run][pipe]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     auto result = stdexec::sync_wait(
@@ -136,7 +136,7 @@ TEST_CASE("pipe run maps ECANCELED system_error to set_stopped", "[run][pipe]") 
 }
 
 TEST_CASE("pipe run propagates non-ECANCELED exception as set_error", "[run][pipe]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool threw = false;
 
@@ -151,7 +151,7 @@ TEST_CASE("pipe run propagates non-ECANCELED exception as set_error", "[run][pip
 
 TEST_CASE("pipe run maps async_read cancellation to set_stopped", "[run][pipe][cancellation]") {
     using namespace std::chrono_literals;
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::array<int, 2> pipefd{};

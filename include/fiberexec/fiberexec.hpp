@@ -2,13 +2,13 @@
 
 /// Umbrella header — include this for the full fiberexec public API.
 ///
-/// @see fiber_context
-/// @see fiber_scheduler
+/// @see context
+/// @see scheduler
 /// @see async_read
 /// @see async_write
-/// @see fiber_sync_wait
+/// @see sync_wait
 #include <fiberexec/async_io.hpp>
-#include <fiberexec/fiber_channel.hpp>
-#include <fiberexec/fiber_context.hpp>
-#include <fiberexec/fiber_sync_wait.hpp>
+#include <fiberexec/channel.hpp>
+#include <fiberexec/context.hpp>
 #include <fiberexec/run.hpp>
+#include <fiberexec/sync_wait.hpp>

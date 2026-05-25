@@ -17,7 +17,7 @@
 // SetItemsProcessed lets Google Benchmark report ns/switch alongside ns/iter.
 // ---------------------------------------------------------------------------
 static void BM_FiberContextSwitch(benchmark::State& state) {
-    fiberexec::fiber_context ctx{1};
+    fiberexec::context ctx{1};
     auto sched = ctx.get_scheduler();
 
     constexpr int64_t kN = 10'000;
@@ -82,7 +82,7 @@ BENCHMARK(BM_ThreadContextSwitch)->UseRealTime();
 // workload dispatched through run(sched, fn).
 // ---------------------------------------------------------------------------
 static void BM_RunNoop(benchmark::State& state) {
-    fiberexec::fiber_context ctx{1};
+    fiberexec::context ctx{1};
     auto sched = ctx.get_scheduler();
 
     for ([[maybe_unused]] auto _ : state) {
@@ -99,7 +99,7 @@ BENCHMARK(BM_RunNoop)->UseRealTime();
 // in run vs then.
 // ---------------------------------------------------------------------------
 static void BM_ScheduleThenNoop(benchmark::State& state) {
-    fiberexec::fiber_context ctx{1};
+    fiberexec::context ctx{1};
     auto sched = ctx.get_scheduler();
 
     for ([[maybe_unused]] auto _ : state) {

@@ -8,10 +8,10 @@
 #include <numeric>
 #include <vector>
 
-TEST_CASE("push and pop exchange a value", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("push and pop exchange a value", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{4};
+    fiberexec::channel<int> ch{4};
 
     stdexec::sync_wait(
         stdexec::when_all(fiberexec::run(sched, [&] { REQUIRE(ch.push(42) == fiberexec::channel_op_status::success); }),
@@ -22,20 +22,20 @@ TEST_CASE("push and pop exchange a value", "[fiber_channel]") {
                           })));
 }
 
-TEST_CASE("value_pop returns the value directly", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("value_pop returns the value directly", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{2}; // capacity 2 → stores 1 item (ring buffer uses one slot as sentinel)
+    fiberexec::channel<int> ch{2}; // capacity 2 → stores 1 item (ring buffer uses one slot as sentinel)
 
     stdexec::sync_wait(
         stdexec::when_all(fiberexec::run(sched, [&] { REQUIRE(ch.push(7) == fiberexec::channel_op_status::success); }),
                           fiberexec::run(sched, [&] { REQUIRE(ch.value_pop() == 7); })));
 }
 
-TEST_CASE("try_push returns full when channel is at capacity", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("try_push returns full when channel is at capacity", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{4}; // capacity 4 → stores 3 items
+    fiberexec::channel<int> ch{4}; // capacity 4 → stores 3 items
 
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         REQUIRE(ch.try_push(1) == fiberexec::channel_op_status::success);
@@ -45,10 +45,10 @@ TEST_CASE("try_push returns full when channel is at capacity", "[fiber_channel]"
     }));
 }
 
-TEST_CASE("try_pop returns empty on an empty channel", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("try_pop returns empty on an empty channel", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{4};
+    fiberexec::channel<int> ch{4};
 
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         int v{};
@@ -56,10 +56,10 @@ TEST_CASE("try_pop returns empty on an empty channel", "[fiber_channel]") {
     }));
 }
 
-TEST_CASE("push returns closed after channel is closed", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("push returns closed after channel is closed", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{4};
+    fiberexec::channel<int> ch{4};
 
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         ch.close();
@@ -69,10 +69,10 @@ TEST_CASE("push returns closed after channel is closed", "[fiber_channel]") {
 }
 
 // NOLINTBEGIN(readability-function-cognitive-complexity)
-TEST_CASE("pop drains remaining items then returns closed", "[fiber_channel]") {
-    fiberexec::fiber_context ctx{2};
+TEST_CASE("pop drains remaining items then returns closed", "[channel]") {
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::fiber_channel<int> ch{4};
+    fiberexec::channel<int> ch{4};
 
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         REQUIRE(ch.push(10) == fiberexec::channel_op_status::success);
@@ -88,17 +88,17 @@ TEST_CASE("pop drains remaining items then returns closed", "[fiber_channel]") {
     }));
 }
 
-TEST_CASE("multiple producers and consumers exchange all values", "[fiber_channel]") {
+TEST_CASE("multiple producers and consumers exchange all values", "[channel]") {
     // 4 producers each push N items; 4 consumers drain the channel.
     // Verifies MPMC correctness: every pushed value is received exactly once.
-    fiberexec::fiber_context ctx{4};
+    fiberexec::context ctx{4};
     auto sched = ctx.get_scheduler();
 
     constexpr int kProducers = 4;
     constexpr int kItemsEach = 64;
     constexpr int kTotal = kProducers * kItemsEach;
 
-    fiberexec::fiber_channel<int> ch{16};
+    fiberexec::channel<int> ch{16};
     std::atomic<int> received{0};
     std::atomic<int> sum{0};
     std::atomic<int> producers_done{0};

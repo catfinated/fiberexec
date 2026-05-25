@@ -20,7 +20,7 @@
 #include <vector>
 
 TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     std::array<int, 2> sv{};
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
     auto [recv_fd, send_fd] = sv;
@@ -57,7 +57,7 @@ TEST_CASE("async_accept and async_connect establish a TCP connection", "[network
     socklen_t addrlen = sizeof(addr);
     REQUIRE(::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == 0);
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     constexpr std::string_view kMsg = "hello";
     std::array<char, 5> buf{};
@@ -92,7 +92,7 @@ TEST_CASE("async_recv cancelled automatically via sender stop token", "[networki
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
     auto [recv_fd, send_fd] = sv;
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool auto_cancelled = false;
 
@@ -129,7 +129,7 @@ TEST_CASE("cancel queue drains correctly under load with many concurrent async_r
     using namespace std::chrono_literals;
     constexpr std::size_t N = 100;
 
-    fiberexec::fiber_context ctx{4};
+    fiberexec::context ctx{4};
     auto sched = ctx.get_scheduler();
 
     // Empty read ends — every async_recv blocks until cancelled.

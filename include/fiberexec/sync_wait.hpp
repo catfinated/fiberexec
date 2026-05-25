@@ -20,7 +20,7 @@ namespace fiberexec {
 
 namespace detail {
 
-// Heap-allocated synchronization state shared between fiber_sync_wait (the
+// Heap-allocated synchronization state shared between sync_wait (the
 // waiter) and sync_wait_receiver (the completer). Using shared_ptr instead of
 // a stack-allocated promise/future avoids a use-after-free: when the receiver's
 // set_value wakes the outer fiber on another OS thread, that fiber can destroy
@@ -93,7 +93,7 @@ template <class ValueTuple> struct sync_wait_receiver {
 ///
 /// This is the fiber-pool equivalent of `stdexec::sync_wait`. Calling
 /// `stdexec::sync_wait` from inside a fiberexec fiber would block the OS
-/// thread, starving every other fiber sharing that thread. `fiber_sync_wait`
+/// thread, starving every other fiber sharing that thread. `sync_wait`
 /// suspends only the calling fiber and yields the thread back to the scheduler
 /// so other fibers can continue running.
 ///
@@ -107,9 +107,9 @@ template <class ValueTuple> struct sync_wait_receiver {
 ///
 /// @throws std::runtime_error if called outside a fiberexec fiber.
 /// @throws Whatever the sender delivers via `set_error`.
-template <stdexec::sender Sender> auto fiber_sync_wait(Sender&& sender) {
+template <stdexec::sender Sender> auto sync_wait(Sender&& sender) {
     if (detail::current_ring() == nullptr) {
-        throw std::runtime_error("fiber_sync_wait called outside of a fiberexec fiber");
+        throw std::runtime_error("sync_wait called outside of a fiberexec fiber");
     }
 
     using value_tuple_t = stdexec::value_types_of_t<Sender, stdexec::env<>, std::tuple, std::type_identity_t>;

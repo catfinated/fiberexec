@@ -27,7 +27,7 @@
 int main() {
     constexpr int N = 16;
 
-    fiberexec::fiber_context ctx{4};
+    fiberexec::context ctx{4};
     auto sched = ctx.get_scheduler();
 
     // Create N socketpairs.  pairs[i][0] = write end, pairs[i][1] = read end.

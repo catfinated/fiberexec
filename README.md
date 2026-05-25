@@ -12,7 +12,7 @@ A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300)
 - [Features](#features)
   - [Fibers + senders](#fibers--senders)
   - [stdexec::bulk — parallel fan-out](#stdexecbulk--parallel-fan-out)
-  - [fiber\_channel\<T\> — producer/consumer and accept loops](#fiber_channelt--producerconsumer-and-accept-loops)
+  - [channel\<T\> — producer/consumer and accept loops](#channelt--producerconsumer-and-accept-loops)
 - [Building](#building)
   - [Prerequisites](#prerequisites)
   - [Configure and build](#configure-and-build)
@@ -136,9 +136,9 @@ auto result = fiberexec::run(sched, [rfd, tok = ss.get_token()] {
 
 No intermediate senders, no continuation chains. Just sequential code that happens to be async underneath. The sender/receiver layer gets you onto the fiber pool and collects the result; once inside the fiber, you write normal code.
 
-**`fiberexec::fiber_sync_wait(sender)` — await a sender graph from inside a fiber**
+**`fiberexec::sync_wait(sender)` — await a sender graph from inside a fiber**
 
-The two models complement each other. When you need structured concurrency, you drop back into senders. `fiberexec::fiber_sync_wait` lets you await a sender graph from inside a fiber without blocking the OS thread — only the calling fiber suspends:
+The two models complement each other. When you need structured concurrency, you drop back into senders. `fiberexec::sync_wait` lets you await a sender graph from inside a fiber without blocking the OS thread — only the calling fiber suspends:
 
 ```cpp
 auto work = fiberexec::run(sched, [&] {
@@ -146,9 +146,9 @@ auto work = fiberexec::run(sched, [&] {
     auto n = fiberexec::async_read(config_fd, buf, sizeof(buf));
     auto endpoints = parse_endpoints(std::string_view{buf, static_cast<std::size_t>(n)});
 
-    // Fan-out — use senders for concurrency; fiber_sync_wait suspends this
+    // Fan-out — use senders for concurrency; sync_wait suspends this
     // fiber (not the OS thread) while the inner senders run
-    auto [a, b, c] = *fiberexec::fiber_sync_wait(stdexec::when_all(
+    auto [a, b, c] = *fiberexec::sync_wait(stdexec::when_all(
         fiberexec::run(sched, [&] { return fetch(endpoints[0]); }),
         fiberexec::run(sched, [&] { return fetch(endpoints[1]); }),
         fiberexec::run(sched, [&] { return fetch(endpoints[2]); })
@@ -162,10 +162,10 @@ Fibers for sequential I/O flow, senders for structured concurrency and fan-out. 
 
 ### `stdexec::bulk` — parallel fan-out
 
-`fiberexec::fiber_scheduler` registers a `fiber_domain` that customizes `stdexec::bulk`. When you call `bulk` with `stdexec::par`, each index becomes a separate fiber dispatched across pool threads — all running concurrently, each able to do async I/O:
+`fiberexec::scheduler` registers a `fiber_domain` that customizes `stdexec::bulk`. When you call `bulk` with `stdexec::par`, each index becomes a separate fiber dispatched across pool threads — all running concurrently, each able to do async I/O:
 
 ```cpp
-fiberexec::fiber_context ctx{4};
+fiberexec::context ctx{4};
 auto sched = ctx.get_scheduler();
 
 std::vector<std::uint32_t> results(N);
@@ -182,22 +182,22 @@ stdexec::sync_wait(
 // All N recvs have completed here.
 ```
 
-This is the P2300-idiomatic way to express runtime-variable fan-out. `stdexec::when_all` requires a compile-time-fixed set of senders; `bulk` takes the count at runtime. Swapping out the scheduler — `exec::static_thread_pool` for threads, `fiber_scheduler` for fibers — is the only change needed to get the other execution model. The `fiber_domain` customization ensures the default sequential fallback is never used.
+This is the P2300-idiomatic way to express runtime-variable fan-out. `stdexec::when_all` requires a compile-time-fixed set of senders; `bulk` takes the count at runtime. Swapping out the scheduler — `exec::static_thread_pool` for threads, `scheduler` for fibers — is the only change needed to get the other execution model. The `fiber_domain` customization ensures the default sequential fallback is never used.
 
-`fiber_sync_wait` with `when_all` remains the right choice when you have a small, fixed number of heterogeneous operations and need each result as a typed value. Use `bulk` when the operations are homogeneous and the count is a runtime variable.
+`sync_wait` with `when_all` remains the right choice when you have a small, fixed number of heterogeneous operations and need each result as a typed value. Use `bulk` when the operations are homogeneous and the count is a runtime variable.
 
-### `fiber_channel<T>` — producer/consumer and accept loops
+### `channel<T>` — producer/consumer and accept loops
 
 `when_all` and `bulk` share a key constraint: they require the full set of concurrent operations to be known upfront. An accept loop is a *sequence* — it produces an unbounded stream of connections over time — and has no natural expression in single-shot P2300 senders.
 
 The C++26 standard defers this. stdexec includes experimental sequence senders (`exec::sequence_senders`, `exec::iterate`, `exec::transform_each`) under `experimental::execution`, but `exec::iterate` only wraps C++ ranges, not open-ended async producers. A future `async_accept_all` sequence sender backed by `IORING_ACCEPT_MULTISHOT` is the natural end state, but the composition model for spawning concurrent handlers from an unbounded async source is still being designed.
 
-`fiberexec::fiber_channel<T>` fills that gap today. It is a bounded MPMC channel whose blocking `push` and `pop` operations *suspend the calling fiber* rather than the OS thread — the thread stays free to run other fibers while a producer or consumer waits. This is the key property that makes it composable with the rest of fiberexec: an accept loop fiber and a worker pool can share a channel without any OS thread ever blocking on it.
+`fiberexec::channel<T>` fills that gap today. It is a bounded MPMC channel whose blocking `push` and `pop` operations *suspend the calling fiber* rather than the OS thread — the thread stays free to run other fibers while a producer or consumer waits. This is the key property that makes it composable with the rest of fiberexec: an accept loop fiber and a worker pool can share a channel without any OS thread ever blocking on it.
 
 The accept loop pattern uses this directly:
 
 ```cpp
-fiberexec::fiber_channel<int> conn_ch{8}; // bounded queue, 7 usable slots
+fiberexec::channel<int> conn_ch{8}; // bounded queue, 7 usable slots
 std::stop_source ss;
 
 stdexec::sync_wait(stdexec::when_all(
@@ -264,7 +264,7 @@ Or run the test binary directly with tag filtering:
 
 ```sh
 ./build/debug/tests/fiberexec_tests "[networking]"
-./build/debug/tests/fiberexec_tests "[fiber_sync_wait]"
+./build/debug/tests/fiberexec_tests "[sync_wait]"
 ./build/debug/tests/fiberexec_tests "[bulk]"
 ./build/debug/tests/fiberexec_tests --order rand   # randomise order
 ```
@@ -315,7 +315,7 @@ scenario 2 (timeout fires): (timed out)
 ```
 
 `channel_backpressure` demonstrates cooperative producer suspension via
-`fiber_channel`. A fast producer fills a small bounded channel then blocks on
+`channel`. A fast producer fills a small bounded channel then blocks on
 `push()` until the slow consumer (`async_sleep_for` per item) makes room —
 the OS thread is never blocked. Total runtime is consumer-driven, visible in
 elapsed timestamps. Output:
@@ -331,7 +331,7 @@ elapsed timestamps. Output:
 total: 360 ms  (expected ~360 ms)
 ```
 
-`echo_server_pool` is a realistic TCP echo server using `fiber_channel` as a
+`echo_server_pool` is a realistic TCP echo server using `channel` as a
 bounded connection queue. An accept loop pushes each accepted fd into the
 channel; four worker fibers drain it, each handling one connection to
 completion before taking the next. The channel bounds the pending-connection
@@ -490,7 +490,7 @@ the concurrency-sweep results.
 
 ### Fan-out benchmarks (`bench_fanout`)
 
-Compares `stdexec::bulk` on `fiberexec::fiber_scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
+Compares `stdexec::bulk` on `fiberexec::scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
 
 16 × 4.7 GHz cores, 4-thread pool, 5 repetitions (`--benchmark_repetitions=5 --benchmark_report_aggregates_only=true`):
 

@@ -20,15 +20,15 @@ namespace fiberexec {
 /// the per-thread event loop reaps completions and resumes the fiber — no OS
 /// thread ever blocks.
 ///
-/// Multiple independent `fiber_context` instances may coexist in the same
+/// Multiple independent `context` instances may coexist in the same
 /// process. Each context owns its OS threads and io_uring rings and is
 /// entirely self-contained.
 ///
 /// - Non-copyable and non-movable — it owns OS threads and kernel resources.
 /// - Obtain a lightweight scheduler handle via `get_scheduler()`.
 ///
-/// @see fiber_scheduler
-class fiber_context {
+/// @see scheduler
+class context {
 public:
     /// Default fiber stack size — matches `boost::context::stack_traits::default_size()` (128 KiB).
     static constexpr std::size_t default_stack_size = 128UL * 1024UL;
@@ -40,16 +40,16 @@ public:
     /// @param thread_count Number of OS threads to spin up.
     /// @param stack_size   Stack size in bytes for each spawned fiber.
     ///                     Defaults to `default_stack_size` (128 KiB).
-    explicit fiber_context(std::uint32_t thread_count = std::thread::hardware_concurrency(),
-                           std::size_t stack_size = default_stack_size);
+    explicit context(std::uint32_t thread_count = std::thread::hardware_concurrency(),
+                     std::size_t stack_size = default_stack_size);
 
     /// Drain all in-flight fibers and join every worker thread.
-    ~fiber_context();
+    ~context();
 
-    fiber_context(fiber_context const&) = delete;
-    fiber_context& operator=(fiber_context const&) = delete;
-    fiber_context(fiber_context&&) = delete;
-    fiber_context& operator=(fiber_context&&) = delete;
+    context(context const&) = delete;
+    context& operator=(context const&) = delete;
+    context(context&&) = delete;
+    context& operator=(context&&) = delete;
 
     /// Access the underlying pool (used internally by `schedule_task()`).
     fiber_pool& pool() noexcept { return *pool_; }
@@ -61,14 +61,14 @@ public:
 
     /// Lightweight, copyable handle that satisfies `stdexec::scheduler`.
     ///
-    /// Obtain one from `fiber_context::get_scheduler()`. Calling `schedule()`
+    /// Obtain one from `context::get_scheduler()`. Calling `schedule()`
     /// on this handle returns a sender that, when started, transitions
     /// execution onto the fiber pool and calls `set_value()` on the connected
     /// receiver from inside a new fiber.
     ///
     /// @note Two `scheduler` values compare equal iff they refer to the same
-    ///       `fiber_context`.
-    /// @see fiber_context::get_scheduler()
+    ///       `context`.
+    /// @see context::get_scheduler()
     class scheduler {
     public:
         using scheduler_concept = stdexec::scheduler_tag; ///<  Opt-in tag required by stdexec.
@@ -78,7 +78,7 @@ public:
         /// Answers `get_completion_scheduler` queries so that stdexec
         /// algorithms can inspect which context a sender will complete on.
         struct env {
-            fiber_context* ctx; ///<  Back-pointer to the owning context.
+            context* ctx; ///<  Back-pointer to the owning context.
 
             /// Return the completion scheduler for any completion tag @p Tag.
             template <class Tag>
@@ -95,7 +95,7 @@ public:
             using sender_concept = stdexec::sender_tag;
             using completion_signatures = stdexec::completion_signatures<stdexec::set_value_t()>;
 
-            fiber_context* ctx; ///<  Non-owning pointer to the execution context.
+            context* ctx; ///<  Non-owning pointer to the execution context.
 
             /// Return the environment for this sender.
             [[nodiscard]] env get_env() const noexcept { return {ctx}; }
@@ -118,8 +118,8 @@ public:
                 };
                 using stop_cb_t = stdexec::stop_callback_for_t<stop_token_t, stop_forwarder>;
 
-                Receiver rcvr;               ///<  Connected receiver.
-                fiber_context* ctx{nullptr}; ///<  Execution context to post onto.
+                Receiver rcvr;         ///<  Connected receiver.
+                context* ctx{nullptr}; ///<  Execution context to post onto.
                 /// Per-operation stop source. Starts with no shared state to
                 /// avoid a heap allocation when cancellation is not in use;
                 /// start() allocates a real shared state only if the receiver's
@@ -152,11 +152,11 @@ public:
         /// Return a sender that transitions onto the fiber pool when started.
         [[nodiscard]] schedule_sender schedule() const noexcept { return {ctx_}; }
 
-        /// Two schedulers are equal iff they refer to the same `fiber_context`.
+        /// Two schedulers are equal iff they refer to the same `context`.
         bool operator==(scheduler const&) const noexcept = default;
 
         /// Access the owning context (used by `fiberexec::run`).
-        [[nodiscard]] fiber_context& context() const noexcept { return *ctx_; }
+        [[nodiscard]] context& get_context() const noexcept { return *ctx_; }
 
         /// Expose the fiber domain at the scheduler level so stdexec algorithms
         /// (e.g. sync_wait's domain consistency check) find it here.
@@ -166,11 +166,11 @@ public:
         }
 
     private:
-        friend class fiber_context;
-        explicit scheduler(fiber_context* ctx) noexcept
+        friend class context;
+        explicit scheduler(context* ctx) noexcept
             : ctx_(ctx) {}
 
-        fiber_context* ctx_; ///<  Non-owning pointer to the parent context.
+        context* ctx_; ///<  Non-owning pointer to the parent context.
     };
 
     /// Return a scheduler handle bound to this context.
@@ -182,10 +182,10 @@ private:
     std::unique_ptr<fiber_pool> pool_; ///<  Owned thread pool and io_uring instances.
 };
 
-/// Convenience alias — `fiber_scheduler` is the scheduler type most callers
+/// Convenience alias — `scheduler` is the scheduler type most callers
 /// interact with.
-using fiber_scheduler = fiber_context::scheduler;
+using scheduler = context::scheduler;
 
-static_assert(stdexec::scheduler<fiber_scheduler>);
+static_assert(stdexec::scheduler<scheduler>);
 
 } // namespace fiberexec

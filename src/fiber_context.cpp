@@ -1,4 +1,4 @@
-#include <fiberexec/fiber_context.hpp>
+#include <fiberexec/context.hpp>
 
 #include <boost/fiber/all.hpp>
 #include <liburing.h>
@@ -369,12 +369,12 @@ void schedule_task(fiber_pool& pool, task work) noexcept { pool.post(std::move(w
 } // namespace detail
 
 // ---------------------------------------------------------------------------
-// fiber_context
+// context
 // ---------------------------------------------------------------------------
 
-fiber_context::fiber_context(std::uint32_t thread_count, std::size_t stack_size)
+context::context(std::uint32_t thread_count, std::size_t stack_size)
     : pool_(std::make_unique<fiber_pool>(thread_count, stack_size)) {}
 
-fiber_context::~fiber_context() = default;
+context::~context() = default;
 
 } // namespace fiberexec

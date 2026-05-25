@@ -5,7 +5,7 @@
 #include <chrono>
 #include <iostream>
 
-// Backpressure demonstration via fiber_channel.
+// Backpressure demonstration via channel.
 //
 // A fast producer pushes N items into a small bounded channel (capacity 4,
 // usable slots 3).  A slow consumer simulates processing work with a per-item
@@ -24,10 +24,10 @@ int main() {
     constexpr int kItems = 12;
     constexpr auto kDelay = 30ms;
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
-    fiberexec::fiber_channel<int> ch{4}; // capacity 4 → 3 usable slots
+    fiberexec::channel<int> ch{4}; // capacity 4 → 3 usable slots
 
     const auto t0 = std::chrono::steady_clock::now();
     auto ms = [&] {

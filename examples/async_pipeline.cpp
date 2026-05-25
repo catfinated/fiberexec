@@ -27,7 +27,7 @@ constexpr std::array k_messages{
 } // namespace
 
 int main() {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::array<int, 2> pipe_fds{};

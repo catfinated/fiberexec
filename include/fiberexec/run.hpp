@@ -1,7 +1,7 @@
 #pragma once
 
+#include <fiberexec/context.hpp>
 #include <fiberexec/detail/fiber_ops.hpp>
-#include <fiberexec/fiber_context.hpp>
 
 #include <stdexec/execution.hpp>
 
@@ -40,10 +40,10 @@ template <class Fn> struct run_sender {
     using completion_signatures = run_completion_signatures<result_t>::type;
 
     struct env {
-        fiber_context* ctx;
+        context* ctx;
 
         template <class Tag>
-        [[nodiscard]] auto query(stdexec::get_completion_scheduler_t<Tag> /*tag*/) const noexcept -> fiber_scheduler {
+        [[nodiscard]] auto query(stdexec::get_completion_scheduler_t<Tag> /*tag*/) const noexcept -> scheduler {
             return ctx->get_scheduler();
         }
     };
@@ -61,7 +61,7 @@ template <class Fn> struct run_sender {
         using stop_cb_t = stdexec::stop_callback_for_t<stop_token_t, stop_forwarder>;
 
         Receiver rcvr;
-        fiber_context* ctx{nullptr};
+        context* ctx{nullptr};
         Fn fn;
         std::stop_source fiber_stop_{std::nostopstate};
         std::optional<stop_cb_t> stop_cb_;
@@ -105,7 +105,7 @@ template <class Fn> struct run_sender {
         return {std::move(rcvr), ctx_, fn_, std::stop_source{std::nostopstate}, std::nullopt};
     }
 
-    fiber_context* ctx_;
+    context* ctx_;
     Fn fn_;
 };
 
@@ -250,8 +250,8 @@ template <class Fn> struct run_closure {
 ///   - `set_value(fn())` — @p fn returned normally.
 ///   - `set_stopped()` — @p fn propagated `std::system_error(ECANCELED)`.
 ///   - `set_error(exception_ptr)` — @p fn propagated any other exception.
-template <class Fn> [[nodiscard]] auto run(fiber_scheduler sched, Fn&& fn) {
-    return detail::run_sender<std::decay_t<Fn>>{&sched.context(), std::forward<Fn>(fn)};
+template <class Fn> [[nodiscard]] auto run(scheduler sched, Fn&& fn) {
+    return detail::run_sender<std::decay_t<Fn>>{&sched.get_context(), std::forward<Fn>(fn)};
 }
 
 /// Returns a sender adaptor closure (SAC) for the pipe form of `run`.

@@ -15,11 +15,11 @@ These are concrete items with designs already sketched in the ADRs.
 Implemented as `fiberexec::run(sched, fn)` (Option B from ADR-0001).
 See `include/fiberexec/run.hpp` and `examples/cancellation.cpp`.
 
-### ~~ADR-0002 step 3 — `fiber_channel<T>`~~ ✅ done
+### ~~ADR-0002 step 3 — `channel<T>`~~ ✅ done
 
 Implemented as a thin wrapper over `boost::fibers::buffered_channel<T>` with
 a fiberexec-namespaced `channel_op_status` enum. See
-`include/fiberexec/fiber_channel.hpp`, `tests/test_fiber_channel.cpp`, and
+`include/fiberexec/channel.hpp`, `tests/test_channel.cpp`, and
 `examples/channel_backpressure.cpp`.
 
 ---
@@ -64,7 +64,7 @@ handler before accepting the next serialises the server. `exec::merge_each`
 (also in stdexec experimental) is the intended combinator for running handlers
 concurrently from a sequence, but its interaction with an unbounded async source
 is not yet proven in practice. The `echo_server_pool` pattern — accept loop
-pushing into a bounded `fiber_channel`, drained by a fixed worker pool —
+pushing into a bounded `channel`, drained by a fixed worker pool —
 implements this manually today and would be the reference point for any future
 sequence-sender port.
 
@@ -102,8 +102,8 @@ entry point.
 
 ### ~~Fiber stack size configuration~~ ✅ done
 
-`fiber_context` now accepts a `stack_size` second constructor parameter
-(default `fiber_context::default_stack_size` = 128 KiB, matching `boost::context::stack_traits::default_size()`). The value is
+`context` now accepts a `stack_size` second constructor parameter
+(default `context::default_stack_size` = 128 KiB, matching `boost::context::stack_traits::default_size()`). The value is
 threaded through `fiber_pool` and `io_uring_scheduler` and used via
 `std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}` at
 each fiber launch site.
@@ -119,7 +119,7 @@ explicitly.
 
 ### Thread pool sizing
 
-`fiber_context` currently takes a fixed thread count. Worth investigating:
+`context` currently takes a fixed thread count. Worth investigating:
 - What is the right default? `std::thread::hardware_concurrency()`?
 - Should the pool be allowed to grow dynamically under load?
 - Is there a meaningful interaction between fiber count and thread count for
@@ -132,7 +132,7 @@ explicitly.
 ### ~~A realistic echo server with a proper accept loop~~ ✅ done
 
 Implemented as `examples/echo_server_pool.cpp`. The accept loop runs
-indefinitely, pushing accepted fds into a `fiber_channel<int>`; a fixed pool
+indefinitely, pushing accepted fds into a `channel<int>`; a fixed pool
 of worker fibers drains the channel. Channel capacity bounds the connection
 backlog and provides backpressure to the acceptor when all workers are busy.
 Shutdown is coordinated through a `std::stop_source`: the last test client
@@ -191,6 +191,6 @@ Fans out 100 fibers blocked on `async_recv`; a trigger thread fires
 
 A `tsan` CMake preset was added (`CMakePresets.json`). Boost.Fiber's userspace
 spinlock and condvar are invisible to TSan and suppressed via
-`.tsan-suppressions`. One real race in `fiber_sync_wait` (`done` bool under a
+`.tsan-suppressions`. One real race in `sync_wait` (`done` bool under a
 fiber mutex) was fixed with `std::atomic<bool>` and release/acquire ordering.
 

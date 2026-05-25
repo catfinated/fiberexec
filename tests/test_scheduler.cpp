@@ -15,12 +15,12 @@
 #include <system_error>
 #include <thread>
 
-TEST_CASE("fiber_scheduler satisfies stdexec::scheduler concept", "[scheduler]") {
-    STATIC_REQUIRE(stdexec::scheduler<fiberexec::fiber_scheduler>);
+TEST_CASE("scheduler satisfies stdexec::scheduler concept", "[scheduler]") {
+    STATIC_REQUIRE(stdexec::scheduler<fiberexec::scheduler>);
 }
 
 TEST_CASE("scheduled work executes", "[scheduler]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::atomic<bool> ran{false};
@@ -30,7 +30,7 @@ TEST_CASE("scheduled work executes", "[scheduler]") {
 }
 
 TEST_CASE("work executes on a worker thread, not the caller", "[scheduler]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::thread::id work_thread{};
@@ -42,7 +42,7 @@ TEST_CASE("work executes on a worker thread, not the caller", "[scheduler]") {
 }
 
 TEST_CASE("multiple sequential dispatches all complete", "[scheduler]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::atomic<int> count{0};
@@ -54,7 +54,7 @@ TEST_CASE("multiple sequential dispatches all complete", "[scheduler]") {
 }
 
 TEST_CASE("concurrent dispatch via when_all completes all tasks", "[scheduler]") {
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     std::atomic<int> count{0};
@@ -69,7 +69,7 @@ TEST_CASE("concurrent dispatch via when_all completes all tasks", "[scheduler]")
 
 TEST_CASE("async_sleep_for suspends the fiber for at least the requested duration", "[timer]") {
     using namespace std::chrono_literals;
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     auto const before = std::chrono::steady_clock::now();
@@ -83,7 +83,7 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
     std::stop_source ss;
     ss.request_stop();
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool threw = false;
 
@@ -108,7 +108,7 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
 
 TEST_CASE("async_sleep_for cancelled by stop_source", "[cancellation]") {
     using namespace std::chrono_literals;
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     std::stop_source ss;
     bool cancelled = false;
@@ -134,7 +134,7 @@ TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     std::stop_source ss;
     bool cancelled = false;
@@ -167,7 +167,7 @@ TEST_CASE("async_read cancelled automatically via sender stop token", "[cancella
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool auto_cancelled = false;
 
@@ -203,7 +203,7 @@ TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    fiberexec::fiber_context ctx{2};
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
     constexpr std::string_view kMsg = "ping";

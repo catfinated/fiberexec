@@ -137,7 +137,7 @@ struct fiber_domain : stdexec::default_domain {
         using child_t = std::decay_t<decltype(child)>;
         using shape_t = std::decay_t<decltype(shape)>;
         using fun_t = std::decay_t<decltype(fun)>;
-        return fiber_bulk_sender<shape_t, fun_t, child_t>{&sched.context().pool(), std::move(child), shape,
+        return fiber_bulk_sender<shape_t, fun_t, child_t>{&sched.get_context().pool(), std::move(child), shape,
                                                           std::move(fun)};
     }
 };

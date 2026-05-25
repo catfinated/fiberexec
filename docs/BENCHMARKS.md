@@ -39,7 +39,7 @@ Cost of putting work onto the fiber pool and collecting the result.
 
 ```
 BM_ScheduleNoop         // schedule(sched) | then([] {}) via sync_wait
-BM_FiberSyncWaitNoop    // fiber_sync_wait(schedule(sched) | then([] {}))
+BM_FiberSyncWaitNoop    // sync_wait(schedule(sched) | then([] {}))
 ```
 
 This measures the combined cost of: task enqueue, fiber wake, fiber context
@@ -98,8 +98,7 @@ payload sizes.
 
 ### 3a. `when_all` fan-out scalability
 
-N concurrent fibers each doing one `async_recv`, collected via `fiber_sync_wait
-(when_all(...))`. Vary N: 2, 8, 32, 128. Measure total time to collect all
+N concurrent fibers each doing one `async_recv`, collected via `sync_wait(when_all(...))`. Vary N: 2, 8, 32, 128. Measure total time to collect all
 results. Should scale roughly linearly with N on a multi-thread pool; deviation
 indicates contention in the scheduler or io_uring submission path.
 
@@ -144,7 +143,7 @@ BM_CancellationLatency
   ```
 - Disable CPU frequency boost if present (`/sys/devices/system/cpu/cpufreq/boost`).
 - Pin the benchmark process to a fixed set of cores (`taskset`) to reduce
-  scheduler noise. Use as many cores as the `fiber_context` thread count.
+  scheduler noise. Use as many cores as the `context` thread count.
 - Run benchmarks several times and check for variance before trusting numbers.
 
 ### Avoiding measurement artifacts
@@ -159,14 +158,14 @@ BM_CancellationLatency
   benchmarks, use `RDTSC` via `benchmark::cycleclock` or accept that the
   measurement floor is ~10 ns.
 - **Loopback echo**: both client and server fibers run in the same
-  `fiber_context`. This avoids cross-process OS scheduling but means the
+  `context`. This avoids cross-process OS scheduling but means the
   thread pool must have at least 2 threads (client and server can land on
-  different threads). Use `fiber_context{4}` for echo benchmarks.
+  different threads). Use `context{4}` for echo benchmarks.
 
 ### What to record
 
 For each benchmark, record: machine spec (CPU model, core count, kernel
-version), `fiber_context` thread count, Google Benchmark output (mean, median,
+version), `context` thread count, Google Benchmark output (mean, median,
 stddev), and the preset used (`release` — never benchmark a debug build).
 
 ---

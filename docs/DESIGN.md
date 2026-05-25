@@ -8,7 +8,7 @@ their OS thread; the thread resumes them when the kernel delivers the completion
 ## Components
 
 ```
-fiber_context          — public handle; owns the fiber_pool
+context          — public handle; owns the fiber_pool
   fiber_pool           — shared work queue + eventfd; spawns worker threads
     io_uring_scheduler — per-thread; owns the io_uring ring and drives the
                          Boost.Fiber scheduler loop via suspend_until()
