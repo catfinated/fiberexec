@@ -146,14 +146,15 @@ Currently both sets exist. The distinction (`read`/`write` work on any fd;
 worth documenting clearly and deciding if fiberexec should expose the flags
 parameter on `recv`/`send`.
 
-### `std::expected`-based error API
+### ~~`std::expected`-based error API~~ — won't do
 
-The current API throws `std::system_error` on all errors, including
-cancellation. An alternative would be returning `std::expected<ssize_t,
-std::error_code>` so callers can handle errors inline without exceptions. This
-is orthogonal to the `set_stopped` mapping problem (see ADR-0001) but affects
-calling code ergonomics significantly. Worth a deliberate decision rather than
-accumulating technical debt.
+Exceptions are the correct model for fiber call sites. The fiber value
+proposition is sequential code that reads like blocking calls; pervasive
+`expected` checks at every `async_read`/`async_write` call site would
+undermine that. Cancellation also integrates cleanly through the exception
+path — `ECANCELED` throws, `run` catches and maps to `set_stopped` — which
+would require a separate convention with `expected`. Additionally,
+`std::expected` requires C++23, and the project targets C++20.
 
 ---
 

@@ -60,6 +60,8 @@ You compose senders with algorithms like `then`, `when_all`, `let_value`, and `s
 
 The key insight is that `std::execution` is deliberately agnostic about what the execution context actually is. A scheduler just needs to provide a `schedule()` function that returns a sender. That sender, when started, transitions to the scheduler's context and completes. Everything else composes on top. This means plugging in a fiber pool as the execution context is a natural fit — and that's exactly what fiberexec does.
 
+`std::execution` also integrates directly with C++20 stackless coroutines. stdexec ships `stdexec::task<T>`, a coroutine type that is itself a sender. You can `co_await` any sender from inside a task, and the task itself composes into any sender pipeline. This gives sender/receiver the sequential ergonomics of coroutines without a separate runtime: the coroutine suspends at each `co_await` and the scheduler decides when to resume it. Stackless coroutines are zero-cost at the language level (no heap allocation beyond the initial frame, no dynamic dispatch), but carry a different tradeoff from fibers. Each coroutine type must be explicitly declared, the stack depth is bounded at compile time, and `co_await`-ing a blocking call suspends only the coroutine frame, not the OS thread. fiberexec takes the complementary bet: stackful fibers that can call any blocking-looking API anywhere in the call tree, at the cost of a per-fiber stack allocation and a context switch on every yield.
+
 ### Why I/O matters here
 
 The C++26 standard includes the core execution model but not networking or async I/O — that's being explored for C++29. But the sender/receiver design was built with I/O in mind from the start: senders naturally represent "an operation that completes later," which is exactly what an async read or write is.
@@ -74,7 +76,7 @@ Whether this combination is actually better than a sender-only model is the rese
 
 ### Fibers + senders
 
-When async I/O lands in the standard, a pure sender/receiver approach to sequential I/O will look something like this — every async operation is a separate sender in the chain:
+When async I/O lands in the standard, a pure sender/receiver approach to sequential I/O — setting aside `co_await` integration — will look like every async operation as a separate sender in the chain:
 
 ```cpp
 auto work = schedule(sched)
