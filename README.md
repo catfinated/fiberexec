@@ -9,6 +9,7 @@ A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300)
   - [Fibers vs threads](#fibers-vs-threads)
   - [std::execution (P2300)](#stdexecution-p2300)
   - [Why I/O matters here](#why-io-matters-here)
+- [Features](#features)
   - [Fibers + senders](#fibers--senders)
   - [stdexec::bulk — parallel fan-out](#stdexecbulk--parallel-fan-out)
   - [fiber\_channel\<T\> — producer/consumer and accept loops](#fiber_channelt--producerconsumer-and-accept-loops)
@@ -66,6 +67,10 @@ The C++26 standard includes the core execution model but not networking or async
 Fibers make this particularly interesting because they let you write I/O code that looks synchronous (blocking calls in a straight line) while actually being async under the hood (the fiber yields, another fiber runs, the original resumes when I/O completes). Putting a sender/receiver frontend on a fiber-based I/O runtime could give you the composability and structure of `std::execution` with the ergonomics of blocking code.
 
 Each OS thread in the fiberexec pool owns its own `io_uring` instance. When a fiber wants to do I/O, it submits a request to the thread-local ring and yields; the scheduler reaps completions and resumes the fiber with the result. From the fiber's perspective, the call looks blocking — `auto bytes = fiberexec::async_read(fd, buf, len);` — but no OS thread is ever actually blocked. This is similar in spirit to what [Seastar](https://seastar.io/) and [glommio](https://github.com/DataDog/glommio) do, but with `std::execution` as the composition layer on top.
+
+Whether this combination is actually better than a sender-only model is the research question this project exists to explore.
+
+## Features
 
 ### Fibers + senders
 
@@ -153,7 +158,7 @@ auto work = fiberexec::run(sched, [&] {
 });
 ```
 
-Fibers for sequential I/O flow, senders for structured concurrency and fan-out. The scheduler is the bridge between them. Whether this combination is actually better than a sender-only model is the research question this project exists to explore.
+Fibers for sequential I/O flow, senders for structured concurrency and fan-out. The scheduler is the bridge between them.
 
 ### `stdexec::bulk` — parallel fan-out
 
