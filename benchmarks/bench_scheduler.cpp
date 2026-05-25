@@ -22,14 +22,16 @@ static void BM_FiberContextSwitch(benchmark::State& state) {
 
     constexpr int64_t kN = 10'000;
 
-    for (auto _ : state) {
+    for ([[maybe_unused]] auto _ : state) {
         stdexec::sync_wait(fiberexec::run(sched, [] {
             boost::fibers::fiber other{[] {
-                for (int64_t i = 0; i < kN; ++i)
+                for (int64_t i = 0; i < kN; ++i) {
                     boost::this_fiber::yield();
+                }
             }};
-            for (int64_t i = 0; i < kN; ++i)
+            for (int64_t i = 0; i < kN; ++i) {
                 boost::this_fiber::yield();
+            }
             other.join();
         }));
     }
@@ -50,7 +52,7 @@ BENCHMARK(BM_FiberContextSwitch)->UseRealTime();
 static void BM_ThreadContextSwitch(benchmark::State& state) {
     constexpr int64_t kN = 10'000;
 
-    for (auto _ : state) {
+    for ([[maybe_unused]] auto _ : state) {
         std::binary_semaphore sem_a{0};
         std::binary_semaphore sem_b{0};
 
@@ -83,7 +85,7 @@ static void BM_RunNoop(benchmark::State& state) {
     fiberexec::fiber_context ctx{1};
     auto sched = ctx.get_scheduler();
 
-    for (auto _ : state) {
+    for ([[maybe_unused]] auto _ : state) {
         stdexec::sync_wait(fiberexec::run(sched, [] { benchmark::DoNotOptimize(0); }));
     }
 }
@@ -100,7 +102,7 @@ static void BM_ScheduleThenNoop(benchmark::State& state) {
     fiberexec::fiber_context ctx{1};
     auto sched = ctx.get_scheduler();
 
-    for (auto _ : state) {
+    for ([[maybe_unused]] auto _ : state) {
         stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([] { benchmark::DoNotOptimize(0); }));
     }
 }

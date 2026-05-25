@@ -23,7 +23,23 @@ if(FIBEREXEC_BUILD_TESTS)
   find_package(Catch2 3 CONFIG REQUIRED)
 endif()
 
-# Google Benchmark — provided by vcpkg
+# Google Benchmark + Boost.Asio + asioexec interface — provided by vcpkg / stdexec FetchContent
 if(FIBEREXEC_BUILD_BENCHMARKS)
   find_package(benchmark CONFIG REQUIRED)
+  find_package(Boost REQUIRED COMPONENTS asio system)
+
+  # Configure exec/asio/asio_config.hpp from stdexec's template so the
+  # exec/asio headers know to use Boost.Asio as their backend.
+  set(STDEXEC_ASIO_USES_BOOST 1)
+  set(STDEXEC_ASIO_USES_STANDALONE 0)
+  configure_file(
+    ${stdexec_SOURCE_DIR}/include/exec/asio/asio_config.hpp.in
+    ${CMAKE_BINARY_DIR}/include/exec/asio/asio_config.hpp
+  )
+
+  # Interface target that bundles the configured header path, stdexec, and
+  # Boost.Asio.  bench_echo links against this to access exec::asio::.
+  add_library(asioexec_iface INTERFACE)
+  target_include_directories(asioexec_iface INTERFACE ${CMAKE_BINARY_DIR}/include)
+  target_link_libraries(asioexec_iface INTERFACE STDEXEC::stdexec Boost::asio)
 endif()

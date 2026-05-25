@@ -10,3 +10,4 @@ endfunction()
 
 add_bench(bench_scheduler bench_scheduler.cpp)
 add_bench(bench_echo bench_echo.cpp)
+target_link_libraries(bench_echo PRIVATE asioexec_iface)

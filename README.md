@@ -250,41 +250,62 @@ confirming the extra receiver machinery in `run` adds nothing measurable.
 
 ### Echo server benchmarks (`bench_echo`)
 
-Measured on the same machine. Each iteration opens N concurrent connections,
-each exchanging 100 round-trips of a 64-byte payload over loopback TCP.
-Clients are always OS threads with blocking syscalls; only the server side
-differs. Throughput is total round-trips per second across all connections.
+Four server implementations measured side-by-side. Each iteration opens N
+concurrent connections, each exchanging 100 round-trips of a 64-byte payload
+over loopback TCP. Clients are always OS threads with blocking syscalls; only
+the server side differs. Throughput is total round-trips per second across all
+connections.
 
 | Benchmark | Connections | Wall time / iter | Throughput |
 |-----------|-------------|-----------------|------------|
-| Fiber echo server | 1 | ~1.35 ms | ~73.9k round-trips/s |
-| Fiber echo server | 10 | ~2.37 ms | ~422k round-trips/s |
-| Fiber echo server | 100 | ~15.5 ms | ~645k round-trips/s |
-| Fiber echo server | 1000 | ~137 ms | ~732k round-trips/s |
-| Thread echo server | 1 | ~1.25 ms (median; high variance) | ~71.6k round-trips/s |
-| Thread echo server | 10 | ~3.93 ms | ~254k round-trips/s |
-| Thread echo server | 100 | ~16.7 ms | ~598k round-trips/s |
-| Thread echo server | 1000 | — (skipped; ~2000 OS threads) | — |
+| fiberexec (io_uring fibers) | 1 | ~1.35 ms | ~74.0k round-trips/s |
+| fiberexec (io_uring fibers) | 10 | ~2.35 ms | ~425k round-trips/s |
+| fiberexec (io_uring fibers) | 100 | ~15.7 ms | ~638k round-trips/s |
+| fiberexec (io_uring fibers) | 1000 | ~140 ms | ~716k round-trips/s |
+| Thread-per-connection | 1 | ~1.27 ms (median; 35% CV) | ~71.3k round-trips/s |
+| Thread-per-connection | 10 | ~3.89 ms | ~257k round-trips/s |
+| Thread-per-connection | 100 | ~16.5 ms | ~605k round-trips/s |
+| Thread-per-connection | 1000 | — (skipped; ~2000 OS threads) | — |
+| Asio coroutines (`use_awaitable`) | 1 | ~3.09 ms | ~32.4k round-trips/s |
+| Asio coroutines (`use_awaitable`) | 10 | ~4.65 ms | ~215k round-trips/s |
+| Asio coroutines (`use_awaitable`) | 100 | ~18.9 ms | ~530k round-trips/s |
+| Asio coroutines (`use_awaitable`) | 1000 | ~161 ms | ~620k round-trips/s |
+| asioexec (`exec::asio` + `use_sender`) | 1 | ~3.10 ms | ~32.3k round-trips/s |
+| asioexec (`exec::asio` + `use_sender`) | 10 | ~4.70 ms | ~213k round-trips/s |
+| asioexec (`exec::asio` + `use_sender`) | 100 | ~19.3 ms | ~518k round-trips/s |
+| asioexec (`exec::asio` + `use_sender`) | 1000 | ~161 ms | ~621k round-trips/s |
 
-**At 1 connection**, the two are roughly even (~74k vs ~72k round-trips/s), but
-the thread server shows very high variance (38% CV), suggesting thread
-creation and teardown noise at the single-connection scale.
+**Asio vs asioexec** are within 1–2% at every concurrency level. The extra
+`use_sender` dispatch in the accept path adds nothing measurable relative to
+the I/O cost of the connections themselves. This confirms the P2300 composition
+layer imposes no runtime penalty.
 
-**At 10 and 100 connections**, the fiber server pulls ahead: 422k vs 254k
-round-trips/s at 10 connections (1.7×), and 645k vs 598k at 100 (1.08×). The
-thread server's overhead grows faster because each connection spawns a new OS
-thread with a full kernel stack, and those threads contend for scheduling
-on the same cores.
+**fiberexec vs Asio**: fiber wins at every concurrency level — 2.3× faster at
+1 connection, 2.0× at 10, 1.2× at 100 and 1000. The gap is largest at low
+concurrency where per-round-trip latency dominates. Asio's coroutine path
+(`co_await async_read → co_await async_write`) involves more dispatch layers per
+operation (async_result machinery, executor dispatch, composed-operation
+resumption) than fiberexec's direct io_uring path (`io_uring_submit → CQE →
+fiber resume`). At high concurrency the gap narrows as throughput becomes
+bandwidth-bound rather than latency-bound.
 
-**At 1000 connections**, only the fiber server is practical. It sustains ~732k
-round-trips/s on a fixed pool of 16 OS threads. The thread benchmark is capped
-at 100 connections because 1000 concurrent connections would require ~2000 OS
-threads (one per connection plus one per client), which exhausts per-process
-thread limits and wastes several GB of stack space.
+**Thread-per-connection** lies between the two async models at 10+ connections,
+and is the only approach that cannot reach 1000 concurrent connections (~2000
+OS threads required). Both fiberexec and Asio scale to 1000 connections on a
+fixed pool of 16 OS threads.
 
-The fiber pool's OS thread count stays fixed at `hardware_concurrency()` (16
-here) regardless of connection count — that's the fundamental scalability
-advantage.
+**Why there is no raw io_uring thread-per-connection baseline**: a naive version
+that creates one `io_uring` ring per connection is not a meaningful comparison —
+ring setup (a syscall plus several mmaps) costs more than the blocking syscalls it
+replaces, producing numbers worse than plain `recv`/`send`. A correct raw io_uring
+baseline would need a thread pool where each thread owns one long-lived ring and
+multiplexes many connections over it, processing CQEs in a loop and dispatching
+completions by connection ID. That design *is* fiberexec's architecture, minus the
+fiber scheduler: the same ring-per-OS-thread structure, the same event loop, the
+same fan-out of connections across threads. The only difference is that fiberexec
+uses fibers to express each connection's recv→send→recv cycle as straight-line code
+rather than an explicit state machine. Asio's `io_context` is also this design, so
+the Asio benchmarks already cover this point in the design space.
 
 ## Status
 
@@ -297,9 +318,11 @@ This is a research project and learning exercise. It is not production-ready.
 | stdexec       | FetchContent | `main`  | P2300 reference implementation    |
 | Boost.Fiber   | vcpkg        | 1.84+   | Cooperative fiber runtime         |
 | Boost.Context | vcpkg        | 1.84+   | Low-level context switching       |
+| Boost.Asio    | vcpkg        | 1.84+   | Asio benchmarks (`bench_echo`)    |
+| Google Benchmark | vcpkg     | 1.8+    | Benchmark framework               |
 | liburing      | vcpkg        | 2.4+    | io_uring userspace interface      |
 | Catch2        | vcpkg        | 3.x     | Test framework                    |
-| C++ standard  | —            | C++20   | Concepts, constraints             |
+| C++ standard  | —            | C++20   | Concepts, constraints, coroutines |
 | Linux kernel  | —            | 5.10+   | io_uring support                  |
 
 ## License

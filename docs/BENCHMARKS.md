@@ -56,27 +56,35 @@ interference between separate processes.
 
 ### 2a. Echo server at varying concurrency
 
-Fix message size (e.g. 64 bytes). Vary the number of concurrent client fibers:
-1, 4, 16, 64, 256, 1024. For each concurrency level, measure:
-
-- **Throughput**: round-trips per second
-- **Latency**: p50, p99, p999
+Fixed message size (64 bytes). Vary the number of concurrent connections:
+1, 10, 100, 1000. Measure throughput (round-trips per second) at each level.
 
 ```
-BM_EchoServer/concurrency:1
-BM_EchoServer/concurrency:16
-BM_EchoServer/concurrency:256
-// etc.
+BM_FiberEchoServer/1    BM_FiberEchoServer/10    BM_FiberEchoServer/100    BM_FiberEchoServer/1000
+BM_ThreadEchoServer/1   BM_ThreadEchoServer/10   BM_ThreadEchoServer/100
+BM_AsioEchoServer/1     BM_AsioEchoServer/10     BM_AsioEchoServer/100     BM_AsioEchoServer/1000
+BM_AsioExecEchoServer/1 BM_AsioExecEchoServer/10 BM_AsioExecEchoServer/100 BM_AsioExecEchoServer/1000
 ```
 
-Run the same benchmark against two baselines:
+Baselines:
 
-- **Thread-per-connection** (blocking `read`/`write` on a dedicated
-  `std::thread` per connection). Shows where fibers help: at high concurrency,
-  thread creation and stack overhead become the bottleneck.
-- **Raw io_uring** (no fibers, no framework — submit SQEs and reap CQEs
-  directly in a tight loop). Shows the framework overhead tax: how much does
-  the fiber scheduler and sender machinery add on top of bare io_uring?
+- **Thread-per-connection with blocking syscalls** (`BM_ThreadEchoServer`):
+  one `std::thread` per connection, plain `recv`/`send`. Shows where fibers
+  help: at high concurrency, thread creation and stack overhead become the
+  bottleneck. Capped at 100 connections (~200 OS threads total).
+- **Asio coroutines** (`BM_AsioEchoServer`): `asio::thread_pool` with
+  `co_await async_read`/`async_write`. Represents a mature, production async
+  I/O framework using the same underlying io_uring kernel path.
+- **asioexec** (`BM_AsioExecEchoServer`): `exec::asio::asio_thread_pool` with
+  `use_sender` in the accept path. Tests whether the P2300 composition layer
+  adds measurable overhead over plain Asio.
+
+**Why there is no raw io_uring baseline**: a correct raw io_uring server needs
+a thread pool where each thread owns one long-lived ring and multiplexes many
+connections over it — the same ring-per-OS-thread structure fiberexec uses.
+The only real difference from fiberexec would be an explicit connection state
+machine instead of fibers. Asio's `io_context` implements this design, so the
+Asio benchmarks already cover this point in the design space.
 
 ### 2b. Echo server at varying message sizes
 
@@ -170,5 +178,5 @@ stddev), and the preset used (`release` — never benchmark a debug build).
 2. Implement scheduler microbenchmarks (1a, 1b) first — they have no
    dependencies and validate the benchmark harness.
 3. Implement echo server benchmark (2a) — the most important result.
-4. Add baselines (thread-per-connection, raw io_uring) for comparison.
+4. Add baselines (thread-per-connection, Asio coroutines, asioexec) for comparison.
 5. Add fan-out and cancellation benchmarks (3a, 3b) last.

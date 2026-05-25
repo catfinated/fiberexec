@@ -50,7 +50,8 @@
                 "CMAKE_CXX_CLANG_TIDY": {
                     "type": "STRING",
                     "value": "clang-tidy"
-                }
+                },
+                "FIBEREXEC_BUILD_BENCHMARKS": "ON"
             }
         },
         {

@@ -12,12 +12,13 @@ Checks: >
   -cppcoreguidelines-non-private-member-variables-in-classes,
   performance-*,
   -performance-no-int-to-ptr,
+  -clang-analyzer-unix.StdCLibraryFunctions,
   readability-*,
   -readability-uppercase-literal-suffix,
   -readability-magic-numbers,
   -readability-identifier-length,
 WarningsAsErrors: true
-HeaderFilterRegex: fiberexec
+HeaderFilterRegex: include/fiberexec
 CheckOptions:
   - key: cppcoreguidelines-pro-type-member-init.IgnoreArrays
     value: true
