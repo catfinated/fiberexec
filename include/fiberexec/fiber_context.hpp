@@ -30,12 +30,18 @@ namespace fiberexec {
 /// @see fiber_scheduler
 class fiber_context {
 public:
+    /// Default fiber stack size — matches `boost::context::stack_traits::default_size()` (128 KiB).
+    static constexpr std::size_t default_stack_size = 128UL * 1024UL;
+
     /// Construct the context and start @p thread_count worker threads.
     ///
     /// Defaults to `std::thread::hardware_concurrency()` when omitted.
     ///
     /// @param thread_count Number of OS threads to spin up.
-    explicit fiber_context(std::uint32_t thread_count = std::thread::hardware_concurrency());
+    /// @param stack_size   Stack size in bytes for each spawned fiber.
+    ///                     Defaults to `default_stack_size` (128 KiB).
+    explicit fiber_context(std::uint32_t thread_count = std::thread::hardware_concurrency(),
+                           std::size_t stack_size = default_stack_size);
 
     /// Drain all in-flight fibers and join every worker thread.
     ~fiber_context();

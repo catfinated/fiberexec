@@ -100,12 +100,13 @@ to `set_stopped`; any other exception is forwarded as `set_error(exception_ptr)`
 No exception escapes to `std::terminate` when using the canonical `fiberexec::run`
 entry point.
 
-### Fiber stack size configuration
+### ~~Fiber stack size configuration~~ ✅ done
 
-Boost.Fiber defaults to a fixed stack size (usually 64KB via `fixedsize_stack`
-or `pooled_fixedsize_stack`). High-depth call chains (e.g. fibers doing complex
-parsing) may need larger stacks. Exposing a `stack_size` option on
-`fiber_context` construction would let callers tune this.
+`fiber_context` now accepts a `stack_size` second constructor parameter
+(default `fiber_context::default_stack_size` = 128 KiB, matching `boost::context::stack_traits::default_size()`). The value is
+threaded through `fiber_pool` and `io_uring_scheduler` and used via
+`std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}` at
+each fiber launch site.
 
 ### Lazy stop-token installation
 

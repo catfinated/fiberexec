@@ -53,11 +53,13 @@ constexpr uint64_t k_cancel_tag = 2;
 // ---------------------------------------------------------------------------
 class io_uring_scheduler : public boost::fibers::algo::algorithm {
 public:
-    io_uring_scheduler(std::atomic<bool>* running, int work_efd, std::mutex* mtx, std::queue<task>* work_queue)
+    io_uring_scheduler(
+        std::atomic<bool>* running, int work_efd, std::mutex* mtx, std::queue<task>* work_queue, std::size_t stack_size)
         : running_{running}
         , work_efd_{work_efd}
         , mtx_{mtx}
         , work_queue_{work_queue}
+        , stack_size_{stack_size}
         , notify_fd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
         if (notify_fd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd (notify)");
@@ -204,7 +206,9 @@ private:
                         }
                     }
                     if (work) {
-                        boost::fibers::fiber(std::move(work)).detach();
+                        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_},
+                                             std::move(work))
+                            .detach();
                     }
                 }
                 // Guard re-arm: an unconditional re-arm after the stop token
@@ -230,6 +234,7 @@ private:
     int work_efd_;                 // non-owning — shared work eventfd
     std::mutex* mtx_;              // non-owning — shared work queue mutex
     std::queue<task>* work_queue_; // non-owning — shared work queue
+    std::size_t stack_size_;
     int notify_fd_;
     io_uring ring_{};
     mutable std::mutex ready_mtx_;
@@ -287,8 +292,9 @@ int submit_and_wait(io_uring_sqe* sqe, std::stop_token st) {
 
 class fiber_pool {
 public:
-    explicit fiber_pool(std::uint32_t thread_count)
+    explicit fiber_pool(std::uint32_t thread_count, std::size_t stack_size)
         : running_{true}
+        , stack_size_{stack_size}
         , eventfd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
         if (eventfd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd");
@@ -325,7 +331,8 @@ public:
 
 private:
     void worker() {
-        boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(&running_, eventfd_, &mtx_, &work_queue_);
+        boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(&running_, eventfd_, &mtx_, &work_queue_,
+                                                                    stack_size_);
 
         // Park the main fiber here. The scheduler's suspend_until() drives all
         // io_uring and fiber dispatch. stop() notifies the CV to unblock us.
@@ -344,6 +351,7 @@ private:
     boost::fibers::condition_variable shutdown_cv_;
     boost::fibers::mutex shutdown_mtx_;
     std::atomic<bool> running_;
+    std::size_t stack_size_;
     int eventfd_;
     std::vector<std::thread> threads_;
     std::mutex mtx_;
@@ -364,8 +372,8 @@ void schedule_task(fiber_pool& pool, task work) noexcept { pool.post(std::move(w
 // fiber_context
 // ---------------------------------------------------------------------------
 
-fiber_context::fiber_context(std::uint32_t thread_count)
-    : pool_(std::make_unique<fiber_pool>(thread_count)) {}
+fiber_context::fiber_context(std::uint32_t thread_count, std::size_t stack_size)
+    : pool_(std::make_unique<fiber_pool>(thread_count, stack_size)) {}
 
 fiber_context::~fiber_context() = default;
 
