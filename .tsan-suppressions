@@ -27,6 +27,10 @@ race:boost::fibers::context_initializer::initialize
 # Boost.Fiber allocator teardown — operator delete through uninstrumented path
 race:boost::fibers::detail::default_stack_allocator
 
+# Boost.Fiber buffered_channel ring buffer — operations are ordered through
+# the internal TTAS spinlock, which TSan cannot see.
+race:boost::fibers::buffered_channel
+
 # Shutdown eventfd path: notify() write and destructor close() are ordered
 # through the kernel io_uring CQE mechanism, invisible to TSan.
 race:fiberexec*io_uring_scheduler*notify
