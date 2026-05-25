@@ -15,17 +15,12 @@ These are concrete items with designs already sketched in the ADRs.
 Implemented as `fiberexec::run(sched, fn)` (Option B from ADR-0001).
 See `include/fiberexec/run.hpp` and `examples/cancellation.cpp`.
 
-### ADR-0002 step 3 — `fiber_channel<T>`
+### ~~ADR-0002 step 3 — `fiber_channel<T>`~~ ✅ done
 
-`fiber_mutex` and `fiber_condition_variable` wrappers were dropped (see
-ADR-0002): `fiber_sync_wait.hpp` already exposes `<boost/fiber/future.hpp>`
-publicly, so Boost.Fiber is already in public headers. Users can use 
-`boost::fibers::mutex` / `boost::fibers::condition_variable` directly.
-
-- **`fiber_channel<T>`**: bounded MPMC channel using
-  `boost::fibers::buffered_channel<T>`. Enables structured producer/consumer
-  pipelines within the fiber pool. Still worth adding as a named fiberexec
-  type since it's a higher-level abstraction, not just a rename.
+Implemented as a thin wrapper over `boost::fibers::buffered_channel<T>` with
+a fiberexec-namespaced `channel_op_status` enum. See
+`include/fiberexec/fiber_channel.hpp`, `tests/test_fiber_channel.cpp`, and
+`examples/channel_backpressure.cpp`.
 
 ---
 
@@ -54,6 +49,24 @@ keeps a single SQE in flight and posts a CQE for each new connection. This
 requires a different API shape (the call doesn't return a single fd; it's more
 like a generator) but would dramatically reduce SQE overhead for accept-heavy
 workloads.
+
+`IORING_ACCEPT_MULTISHOT` is also the natural kernel primitive for a future
+P2300 *sequence sender* — a sender that emits `set_next(fd)` once per
+accepted connection and terminates only on error or cancellation. Sequence
+senders are under active development in stdexec under `experimental::execution`
+(sequence_senders.hpp). `exec::iterate` exists today but only wraps C++ ranges,
+not open-ended async producers. Bridging `IORING_ACCEPT_MULTISHOT` to the
+sequence sender model would require a custom sequence sender built with
+`exec::create` or a coroutine-based async generator — neither of which has a
+standard shape yet. The open composition problem remains: structured concurrency
+requires the sequence to own each handler's lifetime, but waiting for one
+handler before accepting the next serialises the server. `exec::merge_each`
+(also in stdexec experimental) is the intended combinator for running handlers
+concurrently from a sequence, but its interaction with an unbounded async source
+is not yet proven in practice. The `echo_server_pool` pattern — accept loop
+pushing into a bounded `fiber_channel`, drained by a fixed worker pool —
+implements this manually today and would be the reference point for any future
+sequence-sender port.
 
 ### Registered buffers / buffer rings
 
@@ -115,23 +128,15 @@ explicitly.
 
 ## API and ergonomics
 
-### A realistic echo server with a proper accept loop
+### ~~A realistic echo server with a proper accept loop~~ ✅ done
 
-The current `echo_server` example accepts exactly 3 clients and exits. A more
-realistic version would loop on `async_accept` indefinitely, spawn a fiber per
-connection, and handle errors gracefully (ECONNRESET, etc.). This would also
-exercise `fiber_sync_wait` in a real accept loop:
-
-```cpp
-while (running) {
-    int client = fiberexec::async_accept(server_fd, nullptr, nullptr);
-    detail::schedule_task(pool, [client] {
-        // per-connection fiber
-        handle_client(client);
-        ::close(client);
-    });
-}
-```
+Implemented as `examples/echo_server_pool.cpp`. The accept loop runs
+indefinitely, pushing accepted fds into a `fiber_channel<int>`; a fixed pool
+of worker fibers drains the channel. Channel capacity bounds the connection
+backlog and provides backpressure to the acceptor when all workers are busy.
+Shutdown is coordinated through a `std::stop_source`: the last test client
+calls `request_stop()`, cancelling `async_accept` (ECANCELED), which closes
+the channel and lets the worker pool drain and exit cleanly.
 
 ### `async_read` / `async_write` vs `async_recv` / `async_send`
 
@@ -170,20 +175,21 @@ be interesting to explore whether fiberexec fibers and C++20 coroutines can
 coexist — specifically, whether a coroutine running on a fiberexec worker could
 `co_await` a sender and have that suspend the coroutine (not the fiber/thread).
 
-### Interaction with `stdexec::when_all` cancellation at scale
+### ~~Interaction with `stdexec::when_all` cancellation at scale~~ ✅ done
 
-The existing tests cover `when_all` cancellation with two branches. It is worth
-testing with many branches (e.g. 100 concurrent `async_recv` calls) to verify
-that the cancel queue drains correctly and no CQEs are lost or misattributed.
+Implemented as the `"cancel queue drains correctly under load with many
+concurrent async_recv operations"` stress test in `tests/test_networking.cpp`.
+Fans out 100 fibers blocked on `async_recv`; a trigger thread fires
+`request_stop()` after 10 ms and all 100 cancellations are verified.
 
 ---
 
 ## Housekeeping
 
-### Sanitizer coverage
+### ~~Sanitizer coverage~~ ✅ done
 
-The `asan` preset enables AddressSanitizer + UBSan. It is worth running the
-full test suite under ThreadSanitizer (TSan) as well — the cross-thread
-promise/future and cancel-queue paths have non-trivial concurrent access that
-TSan might flag.
+A `tsan` CMake preset was added (`CMakePresets.json`). Boost.Fiber's userspace
+spinlock and condvar are invisible to TSan and suppressed via
+`.tsan-suppressions`. One real race in `fiber_sync_wait` (`done` bool under a
+fiber mutex) was fixed with `std::atomic<bool>` and release/acquire ordering.
 

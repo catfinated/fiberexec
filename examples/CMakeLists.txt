@@ -12,3 +12,9 @@ target_link_libraries(cancellation PRIVATE fiberexec::fiberexec)
 
 add_executable(parallel_gather parallel_gather.cpp)
 target_link_libraries(parallel_gather PRIVATE fiberexec::fiberexec)
+
+add_executable(channel_backpressure channel_backpressure.cpp)
+target_link_libraries(channel_backpressure PRIVATE fiberexec::fiberexec)
+
+add_executable(echo_server_pool echo_server_pool.cpp)
+target_link_libraries(echo_server_pool PRIVATE fiberexec::fiberexec)

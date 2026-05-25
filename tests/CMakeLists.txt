@@ -7,6 +7,7 @@ add_executable(fiberexec_tests
   test_fiber_sync_wait.cpp
   test_run.cpp
   test_bulk.cpp
+  test_fiber_channel.cpp
 )
 
 target_link_libraries(fiberexec_tests

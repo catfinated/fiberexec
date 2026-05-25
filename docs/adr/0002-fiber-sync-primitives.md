@@ -1,6 +1,6 @@
 # ADR-0002: Fiber-aware synchronization primitives
 
-**Status**: Partially implemented (`fiber_sync_wait` done; mutex/condvar dropped; channel deferred)
+**Status**: Implemented (`fiber_sync_wait` done; mutex/condvar dropped; `fiber_channel<T>` done)
 
 ## Context
 
@@ -137,17 +137,55 @@ fibers.
 
 ---
 
-### `fiber_channel<T>` — bounded MPMC channel (deferred)
+### `fiber_channel<T>` — bounded MPMC channel
 
 A bounded queue with fiber-aware blocking semantics: `push` suspends the
 producer fiber if the channel is full; `pop` suspends the consumer fiber if
 it is empty. Useful for producer/consumer pipelines entirely within the fiber
 pool.
 
-Implementation would use `boost::fibers::buffered_channel<T>` or a hand-rolled
-variant on top of `fiber_mutex` + `fiber_condition_variable`.
+#### Design
 
-Deferred until mutex/condvar are in place.
+A thin wrapper over `boost::fibers::buffered_channel<T>`. The wrapper exists
+for two reasons: namespace consistency (all fiberexec primitives live in
+`fiberexec::`) and to decouple user code from the Boost.Fiber channel API,
+leaving room to swap the underlying implementation later without changing call
+sites.
+
+The public API exposes its own `channel_op_status` enum (`success`, `empty`,
+`full`, `closed`, `timeout`) rather than re-exporting
+`boost::fibers::channel_op_status`. A private `cvt()` helper translates
+between them.
+
+#### Capacity constraint
+
+`boost::fibers::buffered_channel` requires capacity to be a power of two ≥ 2.
+The ring buffer keeps one slot empty as a sentinel, so effective usable
+capacity is `capacity − 1`. A channel constructed with `fiber_channel<T>{4}`
+holds at most 3 items before `push` blocks.
+
+#### Lifecycle
+
+`close()` signals end-of-stream. Subsequent `push` calls return `closed`
+immediately; `pop` drains any remaining items and then returns `closed`. In
+MPMC pipelines, an atomic counter is the standard pattern for ensuring only
+the last producer to finish calls `close()`:
+
+```cpp
+std::atomic<int> done{0};
+// in each producer, after its push loop:
+if (done.fetch_add(1, std::memory_order_acq_rel) == kProducers - 1) {
+    ch.close();
+}
+```
+
+#### Files
+
+- `include/fiberexec/fiber_channel.hpp` — implementation
+- `tests/test_fiber_channel.cpp` — unit tests (push/pop, try variants, close
+  lifecycle, MPMC correctness)
+- `examples/channel_backpressure.cpp` — fast producer / slow consumer
+  demonstrating cooperative suspension under backpressure
 
 ---
 
@@ -156,7 +194,7 @@ Deferred until mutex/condvar are in place.
 1. ✅ `fiber_sync_wait` — highest leverage; unblocks the README example and
    makes sender fan-out composable from inside fibers.
 2. ~~`fiber_mutex` + `fiber_condition_variable`~~ — dropped; see above.
-3. ⏳ `fiber_channel<T>` — wraps `boost::fibers::buffered_channel<T>`;
+3. ✅ `fiber_channel<T>` — wraps `boost::fibers::buffered_channel<T>`;
    enables structured producer/consumer patterns.
 
 ## Consequences

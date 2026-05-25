@@ -11,6 +11,7 @@ A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300)
   - [Why I/O matters here](#why-io-matters-here)
   - [Fibers + senders](#fibers--senders)
   - [stdexec::bulk — parallel fan-out](#stdexecbulk--parallel-fan-out)
+  - [fiber\_channel\<T\> — producer/consumer and accept loops](#fiber_channelt--producerconsumer-and-accept-loops)
 - [Building](#building)
   - [Prerequisites](#prerequisites)
   - [Configure and build](#configure-and-build)
@@ -180,6 +181,52 @@ This is the P2300-idiomatic way to express runtime-variable fan-out. `stdexec::w
 
 `fiber_sync_wait` with `when_all` remains the right choice when you have a small, fixed number of heterogeneous operations and need each result as a typed value. Use `bulk` when the operations are homogeneous and the count is a runtime variable.
 
+### `fiber_channel<T>` — producer/consumer and accept loops
+
+`when_all` and `bulk` share a key constraint: they require the full set of concurrent operations to be known upfront. An accept loop is a *sequence* — it produces an unbounded stream of connections over time — and has no natural expression in single-shot P2300 senders.
+
+The C++26 standard defers this. stdexec includes experimental sequence senders (`exec::sequence_senders`, `exec::iterate`, `exec::transform_each`) under `experimental::execution`, but `exec::iterate` only wraps C++ ranges, not open-ended async producers. A future `async_accept_all` sequence sender backed by `IORING_ACCEPT_MULTISHOT` is the natural end state, but the composition model for spawning concurrent handlers from an unbounded async source is still being designed.
+
+`fiberexec::fiber_channel<T>` fills that gap today. It is a bounded MPMC channel whose blocking `push` and `pop` operations *suspend the calling fiber* rather than the OS thread — the thread stays free to run other fibers while a producer or consumer waits. This is the key property that makes it composable with the rest of fiberexec: an accept loop fiber and a worker pool can share a channel without any OS thread ever blocking on it.
+
+The accept loop pattern uses this directly:
+
+```cpp
+fiberexec::fiber_channel<int> conn_ch{8}; // bounded queue, 7 usable slots
+std::stop_source ss;
+
+stdexec::sync_wait(stdexec::when_all(
+    // Accept loop: runs until stop is requested.
+    // push() suspends this fiber (not the OS thread) if the queue is full.
+    fiberexec::run(sched, [&] {
+        try {
+            while (true) {
+                int fd = fiberexec::async_accept(server_fd, nullptr, nullptr, ss.get_token());
+                if (conn_ch.push(fd) != fiberexec::channel_op_status::success) {
+                    ::close(fd);
+                    break;
+                }
+            }
+        } catch (std::system_error const& e) {
+            if (e.code().value() != ECANCELED) throw;
+        }
+        conn_ch.close();
+    }),
+    // Worker pool: pop() suspends each fiber until a connection arrives.
+    fiberexec::run(sched, [&] {
+        int fd{};
+        while (conn_ch.pop(fd) == fiberexec::channel_op_status::success) {
+            handle_connection(fd); // async I/O inside — fiber suspends, thread stays free
+        }
+    }),
+    // ... more workers ...
+));
+```
+
+The channel capacity provides natural backpressure: if all workers are busy handling connections, `push` suspends the acceptor cooperatively rather than accepting connections that will immediately queue unhandled. Shutdown is coordinated through `close()`: the accept loop closes the channel after catching `ECANCELED`, workers drain any remaining connections, and `when_all` completes.
+
+See `examples/echo_server_pool.cpp` for the full working server and `examples/channel_backpressure.cpp` for an isolated demonstration of the cooperative suspension behaviour under backpressure.
+
 ## Building
 
 ### Prerequisites
@@ -225,6 +272,8 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/echo_server
 ./build/debug/examples/cancellation
 ./build/debug/examples/parallel_gather
+./build/debug/examples/channel_backpressure
+./build/debug/examples/echo_server_pool
 ```
 
 `parallel_gather` starts 16 producer threads each writing a value into its own
@@ -259,6 +308,32 @@ cancellation if the deadline expires. Output:
 scenario 1 (data arrives):  hello from writer
 scenario 2 (timeout fires): (timed out)
 ```
+
+`channel_backpressure` demonstrates cooperative producer suspension via
+`fiber_channel`. A fast producer fills a small bounded channel then blocks on
+`push()` until the slow consumer (`async_sleep_for` per item) makes room —
+the OS thread is never blocked. Total runtime is consumer-driven, visible in
+elapsed timestamps. Output:
+
+```
+[+0ms] produced 0
+[+0ms] produced 1
+[+0ms] produced 2
+[+0ms] produced 3
+[+30ms] consumed 0
+[+30ms] produced 4
+...
+total: 360 ms  (expected ~360 ms)
+```
+
+`echo_server_pool` is a realistic TCP echo server using `fiber_channel` as a
+bounded connection queue. An accept loop pushes each accepted fd into the
+channel; four worker fibers drain it, each handling one connection to
+completion before taking the next. The channel bounds the pending-connection
+backlog and suspends the acceptor cooperatively when all workers are busy. A
+`stop_source` coordinates shutdown: the last client fires `request_stop()`,
+the accept loop catches `ECANCELED`, closes the channel, and workers drain and
+exit cleanly.
 
 ## Benchmarks
 
@@ -441,7 +516,7 @@ This is a research project and learning exercise. It is not production-ready.
 | Boost.Asio    | vcpkg        | 1.84+   | Asio benchmarks (`bench_echo`)    |
 | Google Benchmark | vcpkg     | 1.8+    | Benchmark framework               |
 | liburing      | vcpkg        | 2.4+    | io_uring userspace interface      |
-| Catch2        | vcpkg        | 3.x     | Test framework                    |
+| Catch2        | vcpkg        | 3.9+    | Test framework                    |
 | C++ standard  | —            | C++20   | Concepts, constraints, coroutines |
 | Linux kernel  | —            | 5.10+   | io_uring support                  |
 
