@@ -10,10 +10,14 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <stop_token>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking]") {
     fiberexec::fiber_context ctx{2};
@@ -112,4 +116,53 @@ TEST_CASE("async_recv cancelled automatically via sender stop token", "[networki
     ::close(send_fd);
 
     REQUIRE(auto_cancelled);
+}
+
+TEST_CASE("cancel queue drains correctly under load with many concurrent async_recv operations",
+          "[networking][cancellation][stress]") {
+    // Fans out N fibers each blocked on async_recv with a shared stop token.
+    // A trigger thread fires request_stop() after a brief delay so all fibers
+    // have had time to submit their SQEs. Each scheduler's cancel queue then
+    // receives up to N/thread_count cancel requests simultaneously; this
+    // verifies that flush_cancel_queue drains all of them and no CQEs are
+    // lost or misattributed.
+    using namespace std::chrono_literals;
+    constexpr std::size_t N = 100;
+
+    fiberexec::fiber_context ctx{4};
+    auto sched = ctx.get_scheduler();
+
+    // Empty read ends — every async_recv blocks until cancelled.
+    std::vector<std::array<int, 2>> pairs(N);
+    for (auto& p : pairs) {
+        REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, p.data()) == 0);
+    }
+
+    std::atomic<int> cancelled{0};
+    std::stop_source ss;
+
+    std::thread trigger{[&ss] {
+        std::this_thread::sleep_for(10ms);
+        ss.request_stop();
+    }};
+
+    stdexec::sync_wait(stdexec::bulk(stdexec::schedule(sched), stdexec::par, N, [&](std::size_t i) {
+        char buf{};
+        try {
+            fiberexec::async_recv(pairs.at(i).at(1), &buf, 1, 0, ss.get_token());
+        } catch (std::system_error const& e) {
+            if (e.code().value() == ECANCELED) {
+                cancelled.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }));
+
+    trigger.join();
+
+    for (auto& [w, r] : pairs) {
+        ::close(w);
+        ::close(r);
+    }
+
+    REQUIRE(cancelled.load() == static_cast<int>(N));
 }
