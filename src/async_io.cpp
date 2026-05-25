@@ -73,9 +73,9 @@ void async_connect(int fd, sockaddr const* addr, socklen_t addrlen, std::stop_to
     }
 }
 
-ssize_t async_recv(int fd, void* buf, std::size_t len, std::stop_token st) {
+ssize_t async_recv(int fd, void* buf, std::size_t len, int flags, std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_recv"));
-    io_uring_prep_recv(sqe, fd, buf, len, 0);
+    io_uring_prep_recv(sqe, fd, buf, len, flags);
     int const res = detail::submit_and_wait(sqe, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_recv");
@@ -83,10 +83,10 @@ ssize_t async_recv(int fd, void* buf, std::size_t len, std::stop_token st) {
     return static_cast<ssize_t>(res);
 }
 
-ssize_t async_send(int fd, void const* buf, std::size_t len, std::stop_token st) {
+ssize_t async_send(int fd, void const* buf, std::size_t len, int flags, std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_send"));
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    io_uring_prep_send(sqe, fd, const_cast<void*>(buf), len, 0);
+    io_uring_prep_send(sqe, fd, const_cast<void*>(buf), len, flags);
     int const res = detail::submit_and_wait(sqe, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_send");

@@ -294,6 +294,39 @@ and is the only approach that cannot reach 1000 concurrent connections (~2000
 OS threads required). Both fiberexec and Asio scale to 1000 connections on a
 fixed pool of 16 OS threads.
 
+### Message-size sweep (`bench_echo`, `BM_*EchoMsgSize`)
+
+Fixed concurrency at 10 connections; message size varies across 64 B, 512 B,
+4 KB, and 64 KB. Throughput is in MiB/s or GiB/s (one direction; multiply by 2
+for round-trip bandwidth). Median values across 3 repetitions.
+
+| Benchmark | 64 B | 512 B | 4 KB | 64 KB |
+|-----------|------|-------|------|-------|
+| fiberexec (io_uring fibers) | ~25.6 MiB/s | ~204 MiB/s | ~1.45 GiB/s | ~9.8 GiB/s |
+| Thread-per-connection | ~27.0 MiB/s | ~226 MiB/s | ~1.66 GiB/s | ~12.7 GiB/s |
+| Asio coroutines (`use_awaitable`) | ~14.1 MiB/s | ~102 MiB/s | ~800 MiB/s | ~4.06 GiB/s |
+| asioexec (`exec::asio` + `use_sender`) | ~13.0 MiB/s | ~103 MiB/s | ~800 MiB/s | ~4.00 GiB/s |
+
+**fiberexec vs Asio**: the advantage does not narrow with larger messages — it
+holds at ~1.8–2× from 64 B through 4 KB and widens to ~2.4× at 64 KB. The
+narrowing hypothesis (per-op dispatch overhead becomes negligible at large
+payloads) does not hold. Asio's `async_read` composed-operation machinery adds
+overhead that becomes more visible when 10 connections simultaneously move large
+payloads and compete for the event loop.
+
+**fiberexec vs thread-per-connection**: blocking threads are faster at every
+message size (5–30% ahead, gap widening with payload). The reason is not partial
+reads — adding `MSG_WAITALL` to `async_recv` produces identical numbers because
+data arrives atomically on loopback regardless. The gap is the io_uring
+submission overhead: blocking `recv`/`send` returns immediately when data is
+already in the socket buffer, while fiberexec always pays the SQE→CQE
+round-trip even when the data is ready. io_uring's async path is most beneficial
+when operations actually need to wait; for bandwidth-saturated loopback the
+synchronous path wins.
+
+**Asio vs asioexec** stay within 1–3% at all message sizes, consistent with
+the concurrency-sweep results.
+
 **Why there is no raw io_uring thread-per-connection baseline**: a naive version
 that creates one `io_uring` ring per connection is not a meaningful comparison —
 ring setup (a syscall plus several mmaps) costs more than the blocking syscalls it

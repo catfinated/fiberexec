@@ -68,12 +68,13 @@ void async_connect(int fd, sockaddr const* addr, socklen_t addrlen, std::stop_to
 /// arrives — the OS thread is never blocked.  Must be called from a fiber
 /// running on a fiberexec worker thread.
 ///
+/// @p flags is passed directly to the underlying recv (e.g. MSG_WAITALL).
 /// If @p st is cancellable and stop is requested, throws std::system_error(ECANCELED).
 ///
 /// @returns Number of bytes received.
 /// @throws std::system_error on I/O failure or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_recv(int fd, void* buf, std::size_t len, std::stop_token st = {});
+ssize_t async_recv(int fd, void* buf, std::size_t len, int flags = 0, std::stop_token st = {});
 
 /// Send @p len bytes from @p buf to socket @p fd.
 ///
@@ -81,12 +82,13 @@ ssize_t async_recv(int fd, void* buf, std::size_t len, std::stop_token st = {});
 /// kernel has accepted the data — the OS thread is never blocked.  Must be
 /// called from a fiber running on a fiberexec worker thread.
 ///
+/// @p flags is passed directly to the underlying send (e.g. MSG_NOSIGNAL).
 /// If @p st is cancellable and stop is requested, throws std::system_error(ECANCELED).
 ///
 /// @returns Number of bytes sent.
 /// @throws std::system_error on I/O failure or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_send(int fd, void const* buf, std::size_t len, std::stop_token st = {});
+ssize_t async_send(int fd, void const* buf, std::size_t len, int flags = 0, std::stop_token st = {});
 
 /// Suspend the calling fiber for at least @p duration.
 ///

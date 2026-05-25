@@ -77,8 +77,8 @@ void run_blocking_client(sockaddr_in const& server_addr) {
 void fiber_conn_handler(int conn_fd) {
     std::array<char, kMsgSize> buf{};
     for (int i = 0; i < kRoundTrips; ++i) {
-        ssize_t n = fiberexec::async_recv(conn_fd, buf.data(), kMsgSize);
-        fiberexec::async_send(conn_fd, buf.data(), static_cast<std::size_t>(n));
+        ssize_t n = fiberexec::async_recv(conn_fd, buf.data(), kMsgSize, MSG_WAITALL);
+        fiberexec::async_send(conn_fd, buf.data(), static_cast<std::size_t>(n), MSG_NOSIGNAL);
     }
     ::close(conn_fd);
 }
@@ -127,6 +127,67 @@ asio::awaitable<void> asio_accept_loop(asio::ip::tcp::acceptor* acc, int64_t num
     for (int64_t i = 0; i < num_conns; ++i) {
         auto sock = co_await acc->async_accept(asio::use_awaitable);
         asio::co_spawn(acc->get_executor(), asio_conn_handler(std::move(sock)), asio::detached);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for the message-size sweep (BM_*EchoMsgSize).
+//
+// These mirror the fixed-size handlers above but accept a runtime msg_size so
+// the buffer uses std::vector.  The fiber handler passes MSG_WAITALL so a
+// single async_recv call fills the buffer, matching the thread handler's
+// semantics and removing the need for a partial-read loop.
+// ---------------------------------------------------------------------------
+
+// Fixed concurrency for the message-size sweep benchmarks.
+constexpr int64_t kMsgSizeBenchConns = 10;
+
+void run_blocking_client_dyn(sockaddr_in const& server_addr, std::size_t msg_size) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    ::connect(fd, reinterpret_cast<sockaddr const*>(&server_addr), sizeof(server_addr));
+    std::vector<char> buf(msg_size);
+    for (int i = 0; i < kRoundTrips; ++i) {
+        ::send(fd, buf.data(), msg_size, MSG_NOSIGNAL);
+        ::recv(fd, buf.data(), msg_size, MSG_WAITALL);
+    }
+    ::close(fd);
+}
+
+void fiber_conn_handler_dyn(int conn_fd, std::size_t msg_size) {
+    std::vector<char> buf(msg_size);
+    for (int i = 0; i < kRoundTrips; ++i) {
+        fiberexec::async_recv(conn_fd, buf.data(), msg_size, MSG_WAITALL);
+        fiberexec::async_send(conn_fd, buf.data(), msg_size, MSG_NOSIGNAL);
+    }
+    ::close(conn_fd);
+}
+
+void thread_conn_handler_dyn(int conn_fd, std::size_t msg_size) {
+    std::vector<char> buf(msg_size);
+    for (int i = 0; i < kRoundTrips; ++i) {
+        ssize_t n = ::recv(conn_fd, buf.data(), msg_size, MSG_WAITALL);
+        if (n <= 0) {
+            break;
+        }
+        ::send(conn_fd, buf.data(), static_cast<std::size_t>(n), MSG_NOSIGNAL);
+    }
+    ::close(conn_fd);
+}
+
+asio::awaitable<void> asio_conn_handler_dyn(asio::ip::tcp::socket sock, std::size_t msg_size) {
+    std::vector<char> buf(msg_size);
+    for (int i = 0; i < kRoundTrips; ++i) {
+        co_await asio::async_read(sock, asio::buffer(buf), asio::use_awaitable);
+        co_await asio::async_write(sock, asio::buffer(buf), asio::use_awaitable);
+    }
+}
+
+// Takes acceptor and msg_size by value / pointer (not reference) — coroutine
+// lifetimes can outlive the caller's stack frame.
+asio::awaitable<void> asio_accept_loop_dyn(asio::ip::tcp::acceptor* acc, int64_t num_conns, std::size_t msg_size) {
+    for (int64_t i = 0; i < num_conns; ++i) {
+        auto sock = co_await acc->async_accept(asio::use_awaitable);
+        asio::co_spawn(acc->get_executor(), asio_conn_handler_dyn(std::move(sock), msg_size), asio::detached);
     }
 }
 
@@ -345,6 +406,151 @@ static void BM_AsioExecEchoServer(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * num_conns * kRoundTrips);
 }
 BENCHMARK(BM_AsioExecEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime();
+
+// ---------------------------------------------------------------------------
+// Message-size sweep benchmarks (BM_*EchoMsgSize)
+//
+// Fix concurrency at kMsgSizeBenchConns (10) — the level where fiberexec shows
+// the clearest latency advantage over Asio — and vary message size across 64 B,
+// 512 B, 4 KB, and 64 KB. Reports bytes/second so throughput is comparable
+// across sizes. The research question: does fiberexec's advantage narrow at
+// larger payloads as per-op dispatch overhead becomes a smaller fraction of the
+// total transfer time?
+// ---------------------------------------------------------------------------
+static void BM_FiberEchoMsgSize(benchmark::State& state) {
+    auto const msg_size = static_cast<std::size_t>(state.range(0));
+    fiberexec::fiber_context ctx{std::thread::hardware_concurrency()};
+
+    for ([[maybe_unused]] auto _ : state) {
+        int server_fd = make_server_socket();
+        sockaddr_in const addr = bound_addr(server_fd);
+        std::latch done{kMsgSizeBenchConns};
+
+        fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, msg_size, &done] {
+            for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+                int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                if (conn < 0) {
+                    break;
+                }
+                fiberexec::detail::schedule_task(ctx.pool(), [conn, msg_size, &done] {
+                    fiber_conn_handler_dyn(conn, msg_size);
+                    done.count_down();
+                });
+            }
+        });
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(kMsgSizeBenchConns));
+        for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+            clients.emplace_back(run_blocking_client_dyn, std::cref(addr), msg_size);
+        }
+        for (auto& t : clients) {
+            t.join();
+        }
+        done.wait();
+        ::close(server_fd);
+    }
+
+    state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
+}
+BENCHMARK(BM_FiberEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
+
+static void BM_ThreadEchoMsgSize(benchmark::State& state) {
+    auto const msg_size = static_cast<std::size_t>(state.range(0));
+
+    for ([[maybe_unused]] auto _ : state) {
+        int server_fd = make_server_socket();
+        sockaddr_in const addr = bound_addr(server_fd);
+        std::latch done{kMsgSizeBenchConns};
+
+        std::thread accept_thread([server_fd, msg_size, &done] {
+            for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+                int conn = ::accept(server_fd, nullptr, nullptr);
+                if (conn < 0) {
+                    break;
+                }
+                std::thread([conn, msg_size, &done] {
+                    thread_conn_handler_dyn(conn, msg_size);
+                    done.count_down();
+                }).detach();
+            }
+        });
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(kMsgSizeBenchConns));
+        for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+            clients.emplace_back(run_blocking_client_dyn, std::cref(addr), msg_size);
+        }
+        for (auto& t : clients) {
+            t.join();
+        }
+        accept_thread.join();
+        done.wait();
+        ::close(server_fd);
+    }
+
+    state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
+}
+BENCHMARK(BM_ThreadEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
+
+static void BM_AsioEchoMsgSize(benchmark::State& state) {
+    auto const msg_size = static_cast<std::size_t>(state.range(0));
+    asio::thread_pool pool{std::thread::hardware_concurrency()};
+
+    for ([[maybe_unused]] auto _ : state) {
+        asio::ip::tcp::acceptor acceptor{pool.get_executor(), {asio::ip::address_v4::loopback(), 0}};
+        sockaddr_in const addr = asio_local_addr(acceptor);
+
+        asio::co_spawn(pool.get_executor(), asio_accept_loop_dyn(&acceptor, kMsgSizeBenchConns, msg_size),
+                       asio::detached);
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(kMsgSizeBenchConns));
+        for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+            clients.emplace_back(run_blocking_client_dyn, std::cref(addr), msg_size);
+        }
+        for (auto& t : clients) {
+            t.join();
+        }
+    }
+
+    state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
+}
+BENCHMARK(BM_AsioEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
+
+static void BM_AsioExecEchoMsgSize(benchmark::State& state) {
+    auto const msg_size = static_cast<std::size_t>(state.range(0));
+    exec::asio::asio_thread_pool pool{static_cast<std::uint32_t>(std::thread::hardware_concurrency())};
+
+    for ([[maybe_unused]] auto _ : state) {
+        asio::ip::tcp::acceptor acceptor{pool.get_executor(), {asio::ip::address_v4::loopback(), 0}};
+        sockaddr_in const addr = asio_local_addr(acceptor);
+
+        std::thread accept_thread([&acceptor, &pool, msg_size] {
+            for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+                auto opt = stdexec::sync_wait(acceptor.async_accept(exec::asio::use_sender));
+                if (!opt) {
+                    break;
+                }
+                auto sock = std::move(std::get<0>(*opt));
+                asio::co_spawn(pool.get_executor(), asio_conn_handler_dyn(std::move(sock), msg_size), asio::detached);
+            }
+        });
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(kMsgSizeBenchConns));
+        for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+            clients.emplace_back(run_blocking_client_dyn, std::cref(addr), msg_size);
+        }
+        for (auto& t : clients) {
+            t.join();
+        }
+        accept_thread.join();
+    }
+
+    state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
+}
+BENCHMARK(BM_AsioExecEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
 
 // The 1000-connection benchmark opens ~2000 fds simultaneously (1000 client
 // sockets + 1000 accepted fds + io_uring/eventfd overhead per thread). The
