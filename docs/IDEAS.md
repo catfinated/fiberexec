@@ -92,13 +92,13 @@ protocols where round-trip latency matters.
 
 ## Scheduling and pool behaviour
 
-### What happens when a fiber throws an unhandled exception?
+### ~~What happens when a fiber throws an unhandled exception?~~ ✅ done
 
-Currently an unhandled exception in a fiber likely terminates the process via
-`std::terminate`. It is worth making this explicit: either document it as a
-programming error (by contract, all fiber callables must not let exceptions
-escape) or catch at the pool boundary and deliver via `set_error` or a
-configurable handler.
+`run_sender::operation::start` (in `include/fiberexec/run.hpp`) catches all
+exceptions at the fiber entry point: `std::system_error` with `ECANCELED` maps
+to `set_stopped`; any other exception is forwarded as `set_error(exception_ptr)`.
+No exception escapes to `std::terminate` when using the canonical `fiberexec::run`
+entry point.
 
 ### Fiber stack size configuration
 
