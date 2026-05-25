@@ -2,6 +2,31 @@
 
 A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300), built on [Boost.Fiber](https://github.com/boostorg/fiber).
 
+## Table of Contents
+
+- [What is this?](#what-is-this)
+- [Background](#background)
+  - [Fibers vs threads](#fibers-vs-threads)
+  - [std::execution (P2300)](#stdexecution-p2300)
+  - [Why I/O matters here](#why-io-matters-here)
+  - [Fibers + senders](#fibers--senders)
+  - [stdexec::bulk — parallel fan-out](#stdexecbulk--parallel-fan-out)
+- [Building](#building)
+  - [Prerequisites](#prerequisites)
+  - [Configure and build](#configure-and-build)
+  - [Run the tests](#run-the-tests)
+  - [Run the examples](#run-the-examples)
+- [Benchmarks](#benchmarks)
+  - [Building](#building-1)
+  - [Running](#running)
+  - [Scheduler microbenchmarks (bench\_scheduler)](#scheduler-microbenchmarks-bench_scheduler)
+  - [Echo server benchmarks (bench\_echo)](#echo-server-benchmarks-bench_echo)
+  - [Message-size sweep (bench\_echo, BM\_\*EchoMsgSize)](#message-size-sweep-bench_echo-bm_echomsgsize)
+  - [Fan-out benchmarks (bench\_fanout)](#fan-out-benchmarks-bench_fanout)
+- [Status](#status)
+- [Dependencies](#dependencies)
+- [License](#license)
+
 ## What is this?
 
 fiberexec is a research project exploring two things at once:
@@ -104,6 +129,8 @@ auto result = fiberexec::run(sched, [rfd, tok = ss.get_token()] {
 ```
 
 No intermediate senders, no continuation chains. Just sequential code that happens to be async underneath. The sender/receiver layer gets you onto the fiber pool and collects the result; once inside the fiber, you write normal code.
+
+**`fiberexec::fiber_sync_wait(sender)` — await a sender graph from inside a fiber**
 
 The two models complement each other. When you need structured concurrency, you drop back into senders. `fiberexec::fiber_sync_wait` lets you await a sender graph from inside a fiber without blocking the OS thread — only the calling fiber suspends:
 
@@ -385,7 +412,7 @@ the concurrency-sweep results.
 
 Compares `stdexec::bulk` on `fiberexec::fiber_scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
 
-16 × 3.7 GHz cores, 4-thread pool, 5 repetitions (`--benchmark_repetitions=5 --benchmark_report_aggregates_only=true`):
+16 × 4.7 GHz cores, 4-thread pool, 5 repetitions (`--benchmark_repetitions=5 --benchmark_report_aggregates_only=true`):
 
 | N | Fiber (real) | Thread (real) | Fiber items/s | Thread items/s |
 |---|---|---|---|---|
