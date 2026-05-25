@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fiberexec/detail/fiber_bulk.hpp>
 #include <fiberexec/detail/fiber_ops.hpp>
 #include <stdexec/execution.hpp>
 
@@ -150,6 +151,13 @@ public:
 
         /// Access the owning context (used by `fiberexec::run`).
         [[nodiscard]] fiber_context& context() const noexcept { return *ctx_; }
+
+        /// Expose the fiber domain at the scheduler level so stdexec algorithms
+        /// (e.g. sync_wait's domain consistency check) find it here.
+        [[nodiscard]] static auto query(stdexec::get_completion_domain_t<stdexec::set_value_t> /*tag*/) noexcept
+            -> detail::fiber_domain {
+            return {};
+        }
 
     private:
         friend class fiber_context;

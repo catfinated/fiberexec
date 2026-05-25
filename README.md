@@ -127,6 +127,32 @@ auto work = fiberexec::run(sched, [&] {
 
 Fibers for sequential I/O flow, senders for structured concurrency and fan-out. The scheduler is the bridge between them. Whether this combination is actually better than a sender-only model is the research question this project exists to explore.
 
+### `stdexec::bulk` — parallel fan-out
+
+`fiberexec::fiber_scheduler` registers a `fiber_domain` that customizes `stdexec::bulk`. When you call `bulk` with `stdexec::par`, each index becomes a separate fiber dispatched across pool threads — all running concurrently, each able to do async I/O:
+
+```cpp
+fiberexec::fiber_context ctx{4};
+auto sched = ctx.get_scheduler();
+
+std::vector<std::uint32_t> results(N);
+
+stdexec::sync_wait(
+    stdexec::bulk(stdexec::schedule(sched), stdexec::par,
+        static_cast<std::size_t>(N),
+        [&](std::size_t i) {
+            // Each index runs as an independent fiber.
+            // async_recv suspends this fiber; pool threads remain free.
+            fiberexec::async_recv(fds[i], &results[i], sizeof(results[i]), MSG_WAITALL);
+        })
+);
+// All N recvs have completed here.
+```
+
+This is the P2300-idiomatic way to express runtime-variable fan-out. `stdexec::when_all` requires a compile-time-fixed set of senders; `bulk` takes the count at runtime. Swapping out the scheduler — `exec::static_thread_pool` for threads, `fiber_scheduler` for fibers — is the only change needed to get the other execution model. The `fiber_domain` customization ensures the default sequential fallback is never used.
+
+`fiber_sync_wait` with `when_all` remains the right choice when you have a small, fixed number of heterogeneous operations and need each result as a typed value. Use `bulk` when the operations are homogeneous and the count is a runtime variable.
+
 ## Building
 
 ### Prerequisites
@@ -160,6 +186,7 @@ Or run the test binary directly with tag filtering:
 ```sh
 ./build/debug/tests/fiberexec_tests "[networking]"
 ./build/debug/tests/fiberexec_tests "[fiber_sync_wait]"
+./build/debug/tests/fiberexec_tests "[bulk]"
 ./build/debug/tests/fiberexec_tests --order rand   # randomise order
 ```
 
@@ -170,6 +197,20 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/async_pipeline
 ./build/debug/examples/echo_server
 ./build/debug/examples/cancellation
+./build/debug/examples/parallel_gather
+```
+
+`parallel_gather` starts 16 producer threads each writing a value into its own
+socketpair, then fans out 16 concurrent `async_recv` fibers via `stdexec::bulk`
+to gather all results. Output looks like:
+
+```
+result[0] = 0
+result[1] = 1
+result[2] = 4
+...
+result[15] = 225
+sum = 1240  (expected 1240)
 ```
 
 `echo_server` starts a TCP server on loopback, fans out three concurrent
@@ -201,7 +242,7 @@ which enables `-O3` and turns off tests and examples:
 
 ```sh
 cmake --preset benchmark
-cmake --build build/benchmark --target bench_scheduler bench_echo
+cmake --build build/benchmark --target bench_scheduler bench_echo bench_fanout
 ```
 
 ### Running
@@ -326,6 +367,12 @@ synchronous path wins.
 
 **Asio vs asioexec** stay within 1–3% at all message sizes, consistent with
 the concurrency-sweep results.
+
+### Fan-out benchmarks (`bench_fanout`)
+
+Compares `stdexec::bulk` on `fiberexec::fiber_scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
+
+Results to be added once methodology is finalised.
 
 **Why there is no raw io_uring thread-per-connection baseline**: a naive version
 that creates one `io_uring` ring per connection is not a meaningful comparison —

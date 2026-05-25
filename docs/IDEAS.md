@@ -170,15 +170,6 @@ be interesting to explore whether fiberexec fibers and C++20 coroutines can
 coexist — specifically, whether a coroutine running on a fiberexec worker could
 `co_await` a sender and have that suspend the coroutine (not the fiber/thread).
 
-### Performance benchmarking
-
-No benchmarks exist yet. Interesting questions:
-- Fiber context-switch overhead vs thread context-switch (should be ~10–50×
-  faster).
-- Throughput on a loopback echo server at varying concurrency levels.
-- SQE submission overhead: one SQE per op vs batched submission.
-- Comparison with an equivalent Asio or liburing-based implementation.
-
 ### Interaction with `stdexec::when_all` cancellation at scale
 
 The existing tests cover `when_all` cancellation with two branches. It is worth

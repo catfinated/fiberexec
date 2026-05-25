@@ -9,3 +9,6 @@ target_link_libraries(echo_server PRIVATE fiberexec::fiberexec)
 
 add_executable(cancellation cancellation.cpp)
 target_link_libraries(cancellation PRIVATE fiberexec::fiberexec)
+
+add_executable(parallel_gather parallel_gather.cpp)
+target_link_libraries(parallel_gather PRIVATE fiberexec::fiberexec)
