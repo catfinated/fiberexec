@@ -335,6 +335,19 @@ and is the only approach that cannot reach 1000 concurrent connections (~2000
 OS threads required). Both fiberexec and Asio scale to 1000 connections on a
 fixed pool of 16 OS threads.
 
+**Why there is no raw io_uring thread-per-connection baseline**: a naive version
+that creates one `io_uring` ring per connection is not a meaningful comparison —
+ring setup (a syscall plus several mmaps) costs more than the blocking syscalls it
+replaces, producing numbers worse than plain `recv`/`send`. A correct raw io_uring
+baseline would need a thread pool where each thread owns one long-lived ring and
+multiplexes many connections over it, processing CQEs in a loop and dispatching
+completions by connection ID. That design *is* fiberexec's architecture, minus the
+fiber scheduler: the same ring-per-OS-thread structure, the same event loop, the
+same fan-out of connections across threads. The only difference is that fiberexec
+uses fibers to express each connection's recv→send→recv cycle as straight-line code
+rather than an explicit state machine. Asio's `io_context` is also this design, so
+the Asio benchmarks already cover this point in the design space.
+
 ### Message-size sweep (`bench_echo`, `BM_*EchoMsgSize`)
 
 Fixed concurrency at 10 connections; message size varies across 64 B, 512 B,
@@ -372,20 +385,20 @@ the concurrency-sweep results.
 
 Compares `stdexec::bulk` on `fiberexec::fiber_scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
 
-Results to be added once methodology is finalised.
+16 × 3.7 GHz cores, 4-thread pool, 5 repetitions (`--benchmark_repetitions=5 --benchmark_report_aggregates_only=true`):
 
-**Why there is no raw io_uring thread-per-connection baseline**: a naive version
-that creates one `io_uring` ring per connection is not a meaningful comparison —
-ring setup (a syscall plus several mmaps) costs more than the blocking syscalls it
-replaces, producing numbers worse than plain `recv`/`send`. A correct raw io_uring
-baseline would need a thread pool where each thread owns one long-lived ring and
-multiplexes many connections over it, processing CQEs in a loop and dispatching
-completions by connection ID. That design *is* fiberexec's architecture, minus the
-fiber scheduler: the same ring-per-OS-thread structure, the same event loop, the
-same fan-out of connections across threads. The only difference is that fiberexec
-uses fibers to express each connection's recv→send→recv cycle as straight-line code
-rather than an explicit state machine. Asio's `io_context` is also this design, so
-the Asio benchmarks already cover this point in the design space.
+| N | Fiber (real) | Thread (real) | Fiber items/s | Thread items/s |
+|---|---|---|---|---|
+| 2 | 13.0 µs | 10.9 µs | 154k/s | 183k/s |
+| 8 | 23.6 µs | 17.2 µs | 339k/s | 465k/s |
+| 32 | 64.9 µs | 39.2 µs | 493k/s | 816k/s |
+| 128 | 246 µs | 131 µs | 520k/s | 980k/s |
+
+**Threads win, and the gap widens with N.** CPU time is nearly identical at every N (both ~101 µs at N=128); all the difference is coordination overhead. The real/CPU ratio is 2.4× for fibers vs 1.3× for threads at N=128, reflecting io_uring SQE submission, CQE delivery, and fiber context-switch cost on each of the N indices.
+
+The core reason is that this benchmark pre-fills the socketpairs before each iteration, so every read completes immediately — there is no actual I/O latency to overlap. The fiber's io_uring round-trip is pure overhead with no benefit in this scenario. At N=128, each iteration submits 128 SQEs and harvests 128 CQEs; the thread-pool version calls `::read` 128 times on data that is already in the socket buffer.
+
+The fiber advantage materialises when I/O actually blocks: pool threads that would otherwise stall waiting for data can instead run other fibers, keeping all cores productive. That is precisely what `bench_echo` measures. This benchmark deliberately isolates the opposite case — zero-latency reads — to characterise the raw scheduling overhead.
 
 ## Status
 
