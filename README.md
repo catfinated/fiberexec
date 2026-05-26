@@ -36,7 +36,15 @@ fiberexec is a research project exploring two things at once:
 1. **Fiber-based runtimes for I/O-heavy workloads.** Fibers (cooperative, userspace-scheduled lightweight threads) let you run thousands of concurrent tasks on a handful of OS threads. When a task blocks on I/O, the fiber yields and another one picks up — no kernel context switch, no wasted thread sitting idle. This makes fibers a natural fit for servers, pipelines, and anything else that spends most of its time waiting.
 2. **The `std::execution` sender/receiver model for async I/O.** The C++26 `std::execution` framework (P2300) gives us a composable, structured way to express async work — but the standard doesn't include networking or I/O yet. That's expected to come in C++29, and the sender/receiver model was explicitly designed with I/O in mind. This project is an experiment in what that integration might look like in practice: taking the execution model and running it on top of a fiber runtime where "blocking" I/O calls are actually cooperative yields.
 
-As of right now, nobody has published a `std::execution` scheduler backed by fibers. The two ecosystems (fiber runtimes like Boost.Fiber and Marl on one side, sender/receiver implementations like stdexec and libunifex on the other) exist independently. fiberexec is an attempt to bridge them and see what falls out.
+Several prior projects are worth knowing about. [pika](https://github.com/pika-org/pika) (ETH Zurich / CSCS) publishes a `std::execution` scheduler backed by its own stackful fiber engine, aimed at HPC workloads — GPU task scheduling, MPI, and NUMA-aware thread pools — but has no async I/O layer. [helio](https://github.com/romange/helio) uses the same fiber+io_uring pattern fiberexec uses — a fiber suspends itself, stores a resume callback in the SQE's user_data, and the event loop resumes it on CQE — and ships a production-complete framework (HTTP, TLS, DNS) on top of it, but has no P2300 integration at all: its composition model is purely imperative fiber code with no senders, receivers, or structured cancellation. On the P2300+io_uring side without fibers: [libunifex](https://github.com/facebookexperimental/libunifex) ships a full io_uring scheduler with socket and file I/O, and stdexec includes a proof-of-concept io_uring scheduler with timer support — but neither brings fibers into the picture. fiberexec sits at the intersection of all three: the fiber+io_uring I/O bridge from helio's design space, the `std::execution` structured concurrency model from pika's design space, and the io_uring P2300 scheduler work from libunifex and stdexec — with `run(sched, fn)` and the `ECANCELED` → `set_stopped` mapping as the seam between the fiber and sender worlds.
+
+| | Fibers | io_uring | P2300 (`std::execution`) |
+|---|:---:|:---:|:---:|
+| pika | ✓ | | ✓ |
+| helio | ✓ | ✓ | |
+| libunifex | | ✓ | ✓ (pre-P2300) |
+| stdexec | | ✓ (PoC) | ✓ |
+| fiberexec | ✓ | ✓ | ✓ |
 
 ## Background
 
