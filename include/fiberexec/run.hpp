@@ -3,6 +3,7 @@
 #include <fiberexec/context.hpp>
 #include <fiberexec/detail/fiber_ops.hpp>
 
+#include <boost/context/detail/exception.hpp>
 #include <stdexec/execution.hpp>
 
 #include <cerrno>
@@ -84,6 +85,9 @@ template <class Fn> struct run_sender {
                         auto val = std::move(fn)();
                         stdexec::set_value(std::move(rcvr), std::move(val));
                     }
+                } catch (boost::context::detail::forced_unwind const&) {
+                    stdexec::set_stopped(std::move(rcvr));
+                    throw; // Boost.Fiber stack-unwinding; must propagate after completing
                 } catch (std::system_error const& e) {
                     if (e.code().value() == ECANCELED) {
                         stdexec::set_stopped(std::move(rcvr));
@@ -153,6 +157,9 @@ template <class Upstream, class Fn> struct run_pipe_sender {
                         auto val = std::move(op->fn)();
                         stdexec::set_value(std::move(op->rcvr), std::move(val));
                     }
+                } catch (boost::context::detail::forced_unwind const&) {
+                    stdexec::set_stopped(std::move(op->rcvr));
+                    throw; // Boost.Fiber stack-unwinding; must propagate after completing
                 } catch (std::system_error const& e) {
                     if (e.code().value() == ECANCELED) {
                         stdexec::set_stopped(std::move(op->rcvr));

@@ -97,8 +97,18 @@ protocols where round-trip latency matters.
 `run_sender::operation::start` (in `include/fiberexec/run.hpp`) catches all
 exceptions at the fiber entry point: `std::system_error` with `ECANCELED` maps
 to `set_stopped`; any other exception is forwarded as `set_error(exception_ptr)`.
-No exception escapes to `std::terminate` when using the canonical `fiberexec::run`
-entry point.
+`boost::context::detail::forced_unwind` (injected by Boost.Fiber to unwind
+suspended fiber stacks on destruction) is explicitly re-thrown before the
+catch-all so the runtime can complete its stack unwinding. No exception escapes
+to `std::terminate` when using the canonical `fiberexec::run` entry point.
+
+**Design constraint**: `set_stopped` is called on the receiver before
+re-throwing, preserving the P2300 guarantee that every started operation
+completes exactly once. All fibers should still be driven to completion through
+normal paths (value, error, or stop via cancellation token) before the pool
+destructor runs — relying on force-unwind as a cancellation mechanism is a
+design smell. The `echo_server_pool` shutdown sequence (stop token →
+`ECANCELED` → channel close → workers drain) is the correct pattern.
 
 ### ~~Fiber stack size configuration~~ ✅ done
 
