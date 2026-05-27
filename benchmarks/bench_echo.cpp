@@ -1,7 +1,5 @@
 #include <fiberexec/fiberexec.hpp>
 
-#include <fiberexec/detail/fiber_ops.hpp>
-
 #include <benchmark/benchmark.h>
 
 // exec/asio headers — configured by cmake/Dependencies.cmake to use Boost.Asio.
@@ -22,6 +20,7 @@
 #include <liburing.h>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <latch>
 #include <span>
@@ -221,10 +220,10 @@ int g_accept_sentinel{}; // NOLINT(cppcoreguidelines-avoid-non-const-global-vari
 // ---------------------------------------------------------------------------
 // BM_FiberEchoServer
 //
-// The server runs inside a fiberexec fiber pool. An accept-loop fiber accepts
-// num_conns connections; for each it posts a handler fiber via
-// detail::schedule_task (the same mechanism run() uses internally). With N
-// pool threads, up to N fibers can be waiting on io_uring CQEs simultaneously
+// The server runs inside a fiberexec fiber pool using the public API:
+// fiberexec::run for the accept loop, fiberexec::channel<int> for the
+// connection queue, and stdexec::bulk for N concurrent handler fibers.
+// With N pool threads, up to N fibers can wait on io_uring CQEs simultaneously
 // while the OS threads remain free for other fibers.
 //
 // Clients are OS threads with blocking syscalls — identical to the Asio and
@@ -241,33 +240,39 @@ static void BM_FiberEchoServer(benchmark::State& state) {
     // Context is created once and reused across iterations to amortize
     // thread-pool and io_uring ring startup cost.
     fiberexec::context ctx{std::thread::hardware_concurrency()};
+    auto sched = ctx.get_scheduler();
 
     for ([[maybe_unused]] auto _ : state) {
         int server_fd = make_server_socket();
         sockaddr_in const addr = bound_addr(server_fd);
+        fiberexec::channel<int> ch{std::bit_ceil(static_cast<std::size_t>(num_conns) + 1)};
 
-        // Barrier: each handler fiber counts down when it closes its fd.
-        // The iteration body waits before closing the server socket so that
-        // open connection fds don't accumulate across auto-calibrated iterations.
-        std::latch done{num_conns};
-
-        // Post the accept loop onto the pool. It accepts num_conns connections
-        // and posts a handler fiber per connection.
-        //
-        // We use detail::schedule_task directly because when_all requires a
-        // compile-time-fixed number of senders; a runtime-variable fan-out
-        // needs a lower-level post mechanism.
-        fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, num_conns, &done] {
-            for (int64_t i = 0; i < num_conns; ++i) {
-                int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
-                if (conn < 0) {
-                    break;
-                }
-                fiberexec::detail::schedule_task(ctx.pool(), [conn, &done] {
-                    fiber_conn_handler(conn);
-                    done.count_down();
-                });
-            }
+        // Server runs in a background thread so the main thread can launch
+        // clients concurrently.  when_all naturally synchronizes: sync_wait
+        // returns only when both the accept loop and all N worker fibers are
+        // done, replacing the explicit std::latch from the old pattern.
+        std::thread srv([&] {
+            stdexec::sync_wait(stdexec::when_all(
+                fiberexec::run(sched,
+                               [&] {
+                                   for (int64_t i = 0; i < num_conns; ++i) {
+                                       int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                       if (conn < 0) {
+                                           break;
+                                       }
+                                       if (ch.push(conn) != fiberexec::channel_op_status::success) {
+                                           fiberexec::async_close(conn);
+                                       }
+                                   }
+                                   ch.close();
+                               }),
+                stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(num_conns),
+                              [&](std::size_t) {
+                                  int conn{};
+                                  if (ch.pop(conn) == fiberexec::channel_op_status::success) {
+                                      fiber_conn_handler(conn);
+                                  }
+                              })));
         });
 
         std::vector<std::thread> clients;
@@ -278,9 +283,7 @@ static void BM_FiberEchoServer(benchmark::State& state) {
         for (auto& t : clients) {
             t.join();
         }
-
-        // Wait for all handler fibers to close their fds before the next iter.
-        done.wait();
+        srv.join();
         ::close(server_fd);
     }
 
@@ -300,23 +303,35 @@ BENCHMARK(BM_FiberEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime
 static void BM_FiberEchoServer1T(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
     fiberexec::context ctx{1};
+    auto sched = ctx.get_scheduler();
 
     for ([[maybe_unused]] auto _ : state) {
         int server_fd = make_server_socket();
         sockaddr_in const addr = bound_addr(server_fd);
-        std::latch done{num_conns};
+        fiberexec::channel<int> ch{std::bit_ceil(static_cast<std::size_t>(num_conns) + 1)};
 
-        fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, num_conns, &done] {
-            for (int64_t i = 0; i < num_conns; ++i) {
-                int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
-                if (conn < 0) {
-                    break;
-                }
-                fiberexec::detail::schedule_task(ctx.pool(), [conn, &done] {
-                    fiber_conn_handler(conn);
-                    done.count_down();
-                });
-            }
+        std::thread srv([&] {
+            stdexec::sync_wait(stdexec::when_all(
+                fiberexec::run(sched,
+                               [&] {
+                                   for (int64_t i = 0; i < num_conns; ++i) {
+                                       int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                       if (conn < 0) {
+                                           break;
+                                       }
+                                       if (ch.push(conn) != fiberexec::channel_op_status::success) {
+                                           fiberexec::async_close(conn);
+                                       }
+                                   }
+                                   ch.close();
+                               }),
+                stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(num_conns),
+                              [&](std::size_t) {
+                                  int conn{};
+                                  if (ch.pop(conn) == fiberexec::channel_op_status::success) {
+                                      fiber_conn_handler(conn);
+                                  }
+                              })));
         });
 
         std::vector<std::thread> clients;
@@ -327,8 +342,7 @@ static void BM_FiberEchoServer1T(benchmark::State& state) {
         for (auto& t : clients) {
             t.join();
         }
-
-        done.wait();
+        srv.join();
         ::close(server_fd);
     }
 
@@ -601,23 +615,35 @@ BENCHMARK(BM_IoUringEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTi
 static void BM_FiberEchoMsgSize(benchmark::State& state) {
     auto const msg_size = static_cast<std::size_t>(state.range(0));
     fiberexec::context ctx{std::thread::hardware_concurrency()};
+    auto sched = ctx.get_scheduler();
 
     for ([[maybe_unused]] auto _ : state) {
         int server_fd = make_server_socket();
         sockaddr_in const addr = bound_addr(server_fd);
-        std::latch done{kMsgSizeBenchConns};
+        fiberexec::channel<int> ch{std::bit_ceil(static_cast<std::size_t>(kMsgSizeBenchConns) + 1)};
 
-        fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, msg_size, &done] {
-            for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
-                int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
-                if (conn < 0) {
-                    break;
-                }
-                fiberexec::detail::schedule_task(ctx.pool(), [conn, msg_size, &done] {
-                    fiber_conn_handler_dyn(conn, msg_size);
-                    done.count_down();
-                });
-            }
+        std::thread srv([&] {
+            stdexec::sync_wait(stdexec::when_all(
+                fiberexec::run(sched,
+                               [&] {
+                                   for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+                                       int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                       if (conn < 0) {
+                                           break;
+                                       }
+                                       if (ch.push(conn) != fiberexec::channel_op_status::success) {
+                                           fiberexec::async_close(conn);
+                                       }
+                                   }
+                                   ch.close();
+                               }),
+                stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(kMsgSizeBenchConns),
+                              [&](std::size_t) {
+                                  int conn{};
+                                  if (ch.pop(conn) == fiberexec::channel_op_status::success) {
+                                      fiber_conn_handler_dyn(conn, msg_size);
+                                  }
+                              })));
         });
 
         std::vector<std::thread> clients;
@@ -628,7 +654,7 @@ static void BM_FiberEchoMsgSize(benchmark::State& state) {
         for (auto& t : clients) {
             t.join();
         }
-        done.wait();
+        srv.join();
         ::close(server_fd);
     }
 
