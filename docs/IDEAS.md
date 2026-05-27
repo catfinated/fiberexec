@@ -24,6 +24,42 @@ a fiberexec-namespaced `channel_op_status` enum. See
 
 ---
 
+## Benchmarks
+
+The benchmark suite is the primary deliverable of the project; hardening it is
+the highest-leverage work remaining.
+
+### Raw io_uring baseline
+
+The current benchmarks compare fiberexec against thread-per-connection, Asio
+coroutines, and asioexec, but there is no hand-rolled io_uring control — a
+minimal event loop with one ring per thread and no fibers or P2300 overhead.
+Without it, the benchmark cannot isolate the cost of fibers from the cost of
+io_uring itself, and a systems audience will probe this first.
+
+### Latency distributions (p50 / p99 / p999)
+
+All current benchmarks report throughput only. For an I/O runtime the tail
+latency is the real differentiator and the place where the three models (fibers,
+coroutines, threads) actually diverge. Adding HDR-histogram or similar percentile
+reporting to the existing harness would significantly sharpen the story.
+
+### Non-loopback workload
+
+Loopback I/O completes near-instantaneously, which understates the fiber
+advantage — fiber suspension only pays off when I/O actually blocks. At minimum
+one workload should introduce measurable I/O latency (e.g. `tc netem` delay on
+loopback, a Unix-domain socket between containers, or cross-host).
+
+### Head-to-head against pika on an I/O workload
+
+Running pika's fiber scheduler against fiberexec on a socket workload would
+demonstrate that pika's fibers are tuned for compute rather than I/O. It turns
+the "but pika exists" question into a supporting data point and directly answers
+"why does this exist when pika exists?" with numbers.
+
+---
+
 ## io_uring features
 
 ### ~~Timeouts on individual async ops~~ ✅ done
@@ -113,6 +149,17 @@ threaded through `fiber_pool` and `io_uring_scheduler` and used via
 `std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}` at
 each fiber launch site.
 
+### Graceful shutdown drain
+
+The `echo_server_pool` shutdown sequence (stop token → `ECANCELED` → channel
+close → workers drain) is the correct pattern, but it is not enforced at the
+framework level. The `context` destructor should guarantee that all in-flight
+fibers are driven to a terminal completion (value, error, or stopped) before the
+pool tears down. Relying on Boost.Fiber's forced stack unwind as an implicit
+cancellation mechanism is a design smell and breaks the P2300 guarantee that
+every started operation completes exactly once. Closing this gap completes the
+structured-concurrency story.
+
 ### Lazy stop-token installation
 
 ADR-0001 notes that `fiber_specific_ptr` incurs a heap allocation per fiber that
@@ -163,6 +210,82 @@ would require a separate convention with `expected`. Additionally,
 
 ---
 
+## CUDA Integration
+
+It is worth noting upfront that nvexec (part of stdexec) already provides
+first-class P2300 support for NVIDIA GPUs: CUDA streams as schedulers, sender
+algorithms that execute on the GPU, and proper cancellation. Anyone who needs
+production-grade GPU + P2300 integration should start there. The exploration
+below is about a different, narrower question.
+
+The goal here is not to replicate what pika, HPX, or nvexec already do well — scheduling
+CPU-bound compute tasks across fibers and accelerators. CPU-heavy workloads are
+not the focus of fiberexec. The interesting angle is narrower: from userspace,
+GPU communication looks a lot like any other I/O. A `cudaMemcpyAsync` followed
+by a kernel launch and a device-to-host transfer is conceptually a sequence of
+async operations waiting on completion events — exactly the pattern fiberexec
+already handles for sockets and files. Whether this has been done elsewhere with
+io_uring as the notification path is worth investigating; the point is not to
+copy an existing design but to explore how these puzzle pieces fit together.
+
+The mechanism that makes it plausible: each GPU operation submits work to a CUDA
+stream, then registers a host callback via `cudaLaunchHostFunc`. The callback
+runs on a CUDA-internal thread and writes to the owning worker thread's
+notification eventfd. This generates an io_uring CQE, the scheduler wakes up,
+and the fiber resumes with the result. No new mechanisms are needed beyond what
+already exists — the same eventfd and io_uring wait path that handles network
+and file I/O handles GPU completions too.
+
+From the fiber's perspective, GPU work looks like sequential, blocking code. A
+series of allocations, uploads, kernel launches, and downloads reads like
+textbook CUDA — but each call yields the fiber under the hood, freeing the
+thread to run other fibers while the GPU works. Multiple independent GPU
+workloads can interleave on the same thread pool with no coordination code.
+
+```cpp
+// A single fiber doing a vector add — reads like synchronous CUDA,
+// but yields at every GPU operation.
+stdexec::sync_wait(fiberexec::run(sched, [&] {
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, N * sizeof(float));
+    cudaMalloc(&d_b, N * sizeof(float));
+    cudaMalloc(&d_c, N * sizeof(float));
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // Each of these yields the fiber until the GPU operation completes.
+    fiberexec::gpu_memcpy_async(d_a, h_a.data(), N * sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+    fiberexec::gpu_memcpy_async(d_b, h_b.data(), N * sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+
+    fiberexec::gpu_launch(vec_add_kernel, {blocks, threads}, stream,
+                          N, d_a, d_b, d_c);
+
+    fiberexec::gpu_memcpy_async(h_c.data(), d_c, N * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream);
+
+    // h_c now contains the result.
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    cudaStreamDestroy(stream);
+}));
+```
+
+```cpp
+// Multiple independent GPU workloads interleaving on the same thread pool.
+// Each fiber writes sequential code; the scheduler handles concurrency.
+stdexec::sync_wait(stdexec::when_all(
+    fiberexec::run(sched, [&] { vec_add_on_gpu(a1, b1, c1); }),
+    fiberexec::run(sched, [&] { vec_add_on_gpu(a2, b2, c2); }),
+    fiberexec::run(sched, [&] { vec_add_on_gpu(a3, b3, c3); })
+));
+```
+
+---
+
 ## Research questions
 
 ### Comparison with Seastar and glommio
@@ -192,6 +315,22 @@ Fans out 100 fibers blocked on `async_recv`; a trigger thread fires
 ---
 
 ## Housekeeping
+
+### Isolate `fiber_domain` stdexec internal header dependency
+
+`fiber_domain`'s `transform_sender` customization reaches into stdexec's
+internal headers. This will break silently on stdexec updates. The shim should
+be isolated behind a version-pinned boundary so breakage is contained and easy
+to repair.
+
+### README scope disclaimer
+
+The README should state explicitly what fiberexec is not: not a general-purpose
+execution runtime, not a replacement for pika, Asio, stdexec, or libunifex. The
+framing belongs at the top: this is a focused experiment in using stackful fibers
+as the local execution substrate for io_uring-backed I/O inside a P2300-compatible
+runtime. The honest claim is "fibers inside, senders outside" rather than any
+novelty-of-components claim.
 
 ### ~~Sanitizer coverage~~ ✅ done
 
