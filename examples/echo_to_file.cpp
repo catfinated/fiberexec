@@ -66,7 +66,7 @@ sockaddr_in bound_addr(int fd) {
     return addr;
 }
 
-std::atomic<int> g_next_id{0};
+std::atomic<int> g_next_id{0}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Handle one client connection: asynchronously open a per-connection log file,
 // write all received data to it, then asynchronously close it.  Runs entirely
@@ -148,8 +148,9 @@ int main() {
                                                      }
                                                  }
                                              } catch (std::system_error const& e) {
-                                                 if (e.code().value() != ECANCELED)
+                                                 if (e.code().value() != ECANCELED) {
                                                      throw;
+                                                 }
                                              }
                                              conn_ch.close();
                                          }),

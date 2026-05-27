@@ -81,13 +81,21 @@ sockaddr_in asio_addr(asio::ip::tcp::acceptor const& acc) {
 }
 
 void report_percentiles(benchmark::State& state, std::vector<int64_t>& lat) {
-    std::sort(lat.begin(), lat.end());
+    std::ranges::sort(lat);
     std::size_t const n = lat.size();
-    if (n == 0)
+    if (n == 0) {
         return;
-    state.counters["p50_us"] = lat[n / 2] / 1000.0;
-    state.counters["p99_us"] = lat[n * 99 / 100] / 1000.0;
-    state.counters["p999_us"] = lat[std::min(n - 1, n * 999 / 1000)] / 1000.0;
+    }
+    // NOLINT: bounds are guaranteed by the n==0 guard and percentile arithmetic
+    state.counters["p50_us"] =
+        static_cast<double>(lat[n / 2]) /
+        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
+    state.counters["p99_us"] =
+        static_cast<double>(lat[n * 99 / 100]) /
+        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
+    state.counters["p999_us"] =
+        static_cast<double>(lat[std::min(n - 1, n * 999 / 1000)]) /
+        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
 }
 
 // Benchmark loop shared by all variants: round-robins through fds[], times
@@ -98,7 +106,7 @@ void run_latency_loop(benchmark::State& state, std::vector<int> const& fds, std:
     std::size_t const n = fds.size();
 
     for ([[maybe_unused]] auto _ : state) {
-        int fd = fds[idx++ % n];
+        int fd = fds[idx++ % n]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         auto t0 = std::chrono::steady_clock::now();
         ::send(fd, buf.data(), kMsg, MSG_NOSIGNAL);
         ::recv(fd, buf.data(), kMsg, MSG_WAITALL);
@@ -109,7 +117,7 @@ void run_latency_loop(benchmark::State& state, std::vector<int> const& fds, std:
     }
 }
 
-// Connect num_conns clients to addr; wait until the server has accepted them
+// Connect num_conns clients to addr; spin until the server has accepted them
 // all (signalled via n_accepted atomic).
 std::vector<int> connect_clients(sockaddr_in const& addr, int64_t num_conns, std::atomic<int> const& n_accepted) {
     std::vector<int> fds(static_cast<std::size_t>(num_conns));
@@ -117,8 +125,9 @@ std::vector<int> connect_clients(sockaddr_in const& addr, int64_t num_conns, std
         fd = ::socket(AF_INET, SOCK_STREAM, 0);
         ::connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
     }
-    while (n_accepted.load(std::memory_order_acquire) < static_cast<int>(num_conns))
+    while (n_accepted.load(std::memory_order_acquire) < static_cast<int>(num_conns)) {
         std::this_thread::yield();
+    }
     return fds;
 }
 
@@ -127,11 +136,13 @@ std::vector<int> connect_clients(sockaddr_in const& addr, int64_t num_conns, std
 // ---------------------------------------------------------------------------
 
 struct LatencyConn {
-    int fd;
-    bool pending_recv;
+    int fd{};
+    bool pending_recv{};
     std::array<char, kMsg> buf{};
 };
-int g_lat_accept_sentinel{};
+// Address used as a CQE tag to distinguish accept completions from connection
+// completions. The value is never read; only its address matters.
+int g_lat_accept_sentinel{}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 // ---------------------------------------------------------------------------
 // fiber_echo_latency_impl
@@ -149,7 +160,8 @@ int g_lat_accept_sentinel{};
 // worker pool.  sync_wait runs in a background thread so the benchmark loop
 // can drive blocking send/recv on the main thread without starving the server.
 // ---------------------------------------------------------------------------
-static void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
     int64_t const num_conns = state.range(0);
 
     int listener = make_listener();
@@ -170,12 +182,14 @@ static void fiber_echo_latency_impl(benchmark::State& state, unsigned num_thread
                                        int fd = fiberexec::async_accept(listener, nullptr, nullptr, std::nullopt,
                                                                         ss.get_token());
                                        n_accepted.fetch_add(1, std::memory_order_release);
-                                       if (ch.push(fd) != fiberexec::channel_op_status::success)
+                                       if (ch.push(fd) != fiberexec::channel_op_status::success) {
                                            fiberexec::async_close(fd);
+                                       }
                                    }
                                } catch (std::system_error const& e) {
-                                   if (e.code().value() != ECANCELED)
+                                   if (e.code().value() != ECANCELED) {
                                        throw;
+                                   }
                                }
                                ch.close();
                            }),
@@ -188,8 +202,9 @@ static void fiber_echo_latency_impl(benchmark::State& state, unsigned num_thread
                             while (true) {
                                 ssize_t n =
                                     fiberexec::async_recv(fd, std::as_writable_bytes(std::span{buf}), MSG_WAITALL);
-                                if (n <= 0)
+                                if (n <= 0) {
                                     break;
+                                }
                                 fiberexec::async_send(fd,
                                                       std::as_bytes(std::span{buf.data(), static_cast<std::size_t>(n)}),
                                                       MSG_NOSIGNAL);
@@ -208,8 +223,9 @@ static void fiber_echo_latency_impl(benchmark::State& state, unsigned num_thread
     run_latency_loop(state, fds, lat);
 
     ss.request_stop();
-    for (auto fd : fds)
+    for (auto fd : fds) {
         ::close(fd);
+    }
     srv.join();
     ::close(listener);
 
@@ -217,7 +233,7 @@ static void fiber_echo_latency_impl(benchmark::State& state, unsigned num_thread
 }
 
 // Production configuration: hardware_concurrency() pool threads.
-static void BM_FiberEchoLatency(benchmark::State& state) {
+void BM_FiberEchoLatency(benchmark::State& state) {
     fiber_echo_latency_impl(state, std::thread::hardware_concurrency());
 }
 BENCHMARK(BM_FiberEchoLatency)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->MinTime(5.0);
@@ -226,14 +242,14 @@ BENCHMARK(BM_FiberEchoLatency)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->MinT
 // matches the raw io_uring baseline, multi-thread work distribution is the
 // cause of the rising tail.  If p999 still rises, the cause is intrinsic to
 // managing more fibers in Boost.Fiber's scheduler.
-static void BM_FiberEchoLatency1T(benchmark::State& state) { fiber_echo_latency_impl(state, 1); }
+void BM_FiberEchoLatency1T(benchmark::State& state) { fiber_echo_latency_impl(state, 1); }
 BENCHMARK(BM_FiberEchoLatency1T)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->MinTime(5.0);
 
 // Diagnostic: one pool thread per fiber (perfect 1:1 balance, no thread shares
 // more than one connection).  N=100 is omitted — 100 OS threads is not a useful
 // operating point, only a diagnostic.  If p999 at N=10 drops toward the 1T or
 // io_uring baseline, uneven fiber-to-thread distribution is the cause.
-static void BM_FiberEchoLatencyNT(benchmark::State& state) {
+void BM_FiberEchoLatencyNT(benchmark::State& state) {
     auto const num_conns = static_cast<unsigned>(state.range(0));
     fiber_echo_latency_impl(state, num_conns);
 }
@@ -245,7 +261,7 @@ BENCHMARK(BM_FiberEchoLatencyNT)->Arg(1)->Arg(10)->UseManualTime()->MinTime(5.0)
 // Thread-per-connection server.  Each accepted connection gets a dedicated OS
 // thread that loops recv/send until EOF.
 // ---------------------------------------------------------------------------
-static void BM_ThreadEchoLatency(benchmark::State& state) {
+void BM_ThreadEchoLatency(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
     int listener = make_listener();
@@ -257,15 +273,17 @@ static void BM_ThreadEchoLatency(benchmark::State& state) {
     std::thread acceptor([&] {
         for (int64_t i = 0; i < num_conns; ++i) {
             int conn = ::accept(listener, nullptr, nullptr);
-            if (conn < 0)
+            if (conn < 0) {
                 break;
+            }
             n_accepted.fetch_add(1, std::memory_order_release);
             std::thread([conn, &done] {
                 std::array<char, kMsg> buf{};
                 while (true) {
                     ssize_t n = ::recv(conn, buf.data(), kMsg, MSG_WAITALL);
-                    if (n <= 0)
+                    if (n <= 0) {
                         break;
+                    }
                     ::send(conn, buf.data(), static_cast<std::size_t>(n), MSG_NOSIGNAL);
                 }
                 ::close(conn);
@@ -280,8 +298,9 @@ static void BM_ThreadEchoLatency(benchmark::State& state) {
 
     run_latency_loop(state, fds, lat);
 
-    for (auto fd : fds)
+    for (auto fd : fds) {
         ::close(fd);
+    }
     acceptor.join();
     done.wait();
     ::close(listener);
@@ -303,8 +322,9 @@ asio::awaitable<void> asio_lat_handler(asio::ip::tcp::socket sock, std::latch* d
         while (true) {
             auto [ec, n] = co_await asio::async_read(sock, asio::buffer(buf), asio::transfer_exactly(kMsg),
                                                      asio::as_tuple(asio::use_awaitable));
-            if (ec || n == 0)
+            if (ec || n == 0) {
                 break;
+            }
             co_await asio::async_write(sock, asio::buffer(buf, n), asio::use_awaitable);
         }
     } catch (...) {
@@ -316,14 +336,15 @@ asio::awaitable<void>
 asio_lat_accept_loop(asio::ip::tcp::acceptor* acc, int64_t num_conns, std::latch* done, std::atomic<int>* n_accepted) {
     for (int64_t i = 0; i < num_conns; ++i) {
         auto [ec, sock] = co_await acc->async_accept(asio::as_tuple(asio::use_awaitable));
-        if (ec)
+        if (ec) {
             break;
+        }
         n_accepted->fetch_add(1, std::memory_order_release);
         asio::co_spawn(acc->get_executor(), asio_lat_handler(std::move(sock), done), asio::detached);
     }
 }
 
-static void BM_AsioEchoLatency(benchmark::State& state) {
+void BM_AsioEchoLatency(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
     asio::thread_pool pool{std::thread::hardware_concurrency()};
@@ -341,8 +362,9 @@ static void BM_AsioEchoLatency(benchmark::State& state) {
 
     run_latency_loop(state, fds, lat);
 
-    for (auto fd : fds)
+    for (auto fd : fds) {
         ::close(fd);
+    }
     done.wait();
 
     report_percentiles(state, lat);
@@ -357,7 +379,8 @@ BENCHMARK(BM_AsioEchoLatency)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->MinTi
 // client closes the connection.  Exits when all num_conns connections have
 // closed.
 // ---------------------------------------------------------------------------
-static void BM_IoUringEchoLatency(benchmark::State& state) {
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+void BM_IoUringEchoLatency(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
     int listener = make_listener();
@@ -371,7 +394,6 @@ static void BM_IoUringEchoLatency(benchmark::State& state) {
         io_uring ring{};
         io_uring_queue_init(256, &ring, 0);
 
-        // Submit initial accept
         {
             auto* sqe = io_uring_get_sqe(&ring);
             io_uring_prep_accept(sqe, listener, nullptr, nullptr, 0);
@@ -393,7 +415,8 @@ static void BM_IoUringEchoLatency(benchmark::State& state) {
                 if (res >= 0) {
                     ++accepted;
                     n_accepted.fetch_add(1, std::memory_order_release);
-                    auto* conn = new LatencyConn{res, true, {}};
+                    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): lifetime tied to SQE
+                    auto* conn = new LatencyConn{.fd = res, .pending_recv = true, .buf = {}};
                     auto* sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), kMsg, MSG_WAITALL);
                     io_uring_sqe_set_data(sqe, conn);
@@ -405,7 +428,7 @@ static void BM_IoUringEchoLatency(benchmark::State& state) {
                     io_uring_submit(&ring);
                 }
             } else {
-                auto* conn = static_cast<LatencyConn*>(ud);
+                auto* conn = static_cast<LatencyConn*>(ud); // NOLINT(cppcoreguidelines-owning-memory)
                 if (conn->pending_recv) {
                     if (res > 0) {
                         conn->pending_recv = false;
@@ -416,11 +439,10 @@ static void BM_IoUringEchoLatency(benchmark::State& state) {
                         io_uring_submit(&ring);
                     } else {
                         ::close(conn->fd);
-                        delete conn;
+                        delete conn; // NOLINT(cppcoreguidelines-owning-memory)
                         ++closed;
                     }
                 } else {
-                    // send complete: submit next recv
                     conn->pending_recv = true;
                     auto* sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), kMsg, MSG_WAITALL);
@@ -439,8 +461,9 @@ static void BM_IoUringEchoLatency(benchmark::State& state) {
 
     run_latency_loop(state, fds, lat);
 
-    for (auto fd : fds)
+    for (auto fd : fds) {
         ::close(fd);
+    }
     event_loop_thread.join();
     ::close(listener);
 

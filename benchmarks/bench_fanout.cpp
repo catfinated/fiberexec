@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,8 +29,8 @@ static std::vector<std::array<int, 2>> make_pairs(int n) {
 
 static void close_pairs(std::vector<std::array<int, 2>>& pairs) {
     for (auto& p : pairs) {
-        ::close(p[0]);
-        ::close(p[1]);
+        ::close(p[0]); // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+        ::close(p[1]); // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
     }
 }
 
@@ -37,7 +38,7 @@ static void close_pairs(std::vector<std::array<int, 2>>& pairs) {
 static void fill_pairs(const std::vector<std::array<int, 2>>& pairs) {
     char b = 'x';
     for (const auto& p : pairs) {
-        if (::write(p[0], &b, 1) != 1) {
+        if (::write(p[0], &b, 1) != 1) { // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
             throw std::runtime_error("fill_pairs: write failed");
         }
     }
@@ -63,8 +64,10 @@ static void BM_FiberFanOut(benchmark::State& state) {
 
         stdexec::sync_wait(
             stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(n), [&](std::size_t i) {
-                char buf;
-                fiberexec::async_recv(pairs[i][1], &buf, 1);
+                char buf{};
+                fiberexec::async_recv(
+                    pairs[i][1], std::as_writable_bytes(
+                                     std::span{&buf, 1})); // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                 benchmark::DoNotOptimize(buf);
             }));
     }
@@ -87,7 +90,7 @@ static void BM_ThreadFanOut(benchmark::State& state) {
         stdexec::sync_wait(
             stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(n), [&](std::size_t i) {
                 char buf;
-                if (::read(pairs[i][1], &buf, 1) != 1) {
+                if (::read(pairs[i][1], &buf, 1) != 1) { // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
                     throw std::runtime_error("BM_ThreadFanOut: read failed");
                 }
                 benchmark::DoNotOptimize(buf);

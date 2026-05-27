@@ -214,7 +214,7 @@ struct IoUringConn {
 };
 
 // Sentinel: its address is distinct from any heap-allocated IoUringConn*.
-int g_accept_sentinel{};
+int g_accept_sentinel{}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 } // namespace
 
@@ -309,8 +309,9 @@ static void BM_FiberEchoServer1T(benchmark::State& state) {
         fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, num_conns, &done] {
             for (int64_t i = 0; i < num_conns; ++i) {
                 int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
-                if (conn < 0)
+                if (conn < 0) {
                     break;
+                }
                 fiberexec::detail::schedule_task(ctx.pool(), [conn, &done] {
                     fiber_conn_handler(conn);
                     done.count_down();
@@ -323,8 +324,9 @@ static void BM_FiberEchoServer1T(benchmark::State& state) {
         for (int64_t i = 0; i < num_conns; ++i) {
             clients.emplace_back(run_blocking_client, std::cref(addr));
         }
-        for (auto& t : clients)
+        for (auto& t : clients) {
             t.join();
+        }
 
         done.wait();
         ::close(server_fd);
@@ -492,6 +494,7 @@ BENCHMARK(BM_AsioExecEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealT
 // overhead, while the gap at high concurrency reflects the parallelism
 // difference.  Both effects are intentional and documented.
 // ---------------------------------------------------------------------------
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void BM_IoUringEchoServer(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
@@ -528,7 +531,11 @@ static void BM_IoUringEchoServer(benchmark::State& state) {
             if (ud == static_cast<void*>(&g_accept_sentinel)) {
                 if (res >= 0) {
                     ++accepted;
-                    auto* conn = new IoUringConn{res, kRoundTrips, true, std::vector<char>(kMsgSize)};
+                    auto* conn =
+                        new IoUringConn{.fd = res,
+                                        .rounds_left = kRoundTrips,
+                                        .pending_recv = true,
+                                        .buf = std::vector<char>(kMsgSize)}; // NOLINT(cppcoreguidelines-owning-memory)
                     auto* sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), kMsgSize, MSG_WAITALL);
                     io_uring_sqe_set_data(sqe, conn);
@@ -540,7 +547,7 @@ static void BM_IoUringEchoServer(benchmark::State& state) {
                     io_uring_submit(&ring);
                 }
             } else {
-                auto* conn = static_cast<IoUringConn*>(ud);
+                auto* conn = static_cast<IoUringConn*>(ud); // NOLINT(cppcoreguidelines-owning-memory)
                 if (conn->pending_recv) {
                     if (res > 0) {
                         conn->pending_recv = false;
@@ -551,7 +558,7 @@ static void BM_IoUringEchoServer(benchmark::State& state) {
                         io_uring_submit(&ring);
                     } else {
                         ::close(conn->fd);
-                        delete conn;
+                        delete conn; // NOLINT(cppcoreguidelines-owning-memory)
                         ++closed;
                     }
                 } else {
@@ -563,15 +570,16 @@ static void BM_IoUringEchoServer(benchmark::State& state) {
                         io_uring_submit(&ring);
                     } else {
                         ::close(conn->fd);
-                        delete conn;
+                        delete conn; // NOLINT(cppcoreguidelines-owning-memory)
                         ++closed;
                     }
                 }
             }
         }
 
-        for (auto& t : clients)
+        for (auto& t : clients) {
             t.join();
+        }
         ::close(server_fd);
     }
 
@@ -725,6 +733,7 @@ static void BM_AsioExecEchoMsgSize(benchmark::State& state) {
 }
 BENCHMARK(BM_AsioExecEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void BM_IoUringEchoMsgSize(benchmark::State& state) {
     auto const msg_size = static_cast<std::size_t>(state.range(0));
 
@@ -761,7 +770,11 @@ static void BM_IoUringEchoMsgSize(benchmark::State& state) {
             if (ud == static_cast<void*>(&g_accept_sentinel)) {
                 if (res >= 0) {
                     ++accepted;
-                    auto* conn = new IoUringConn{res, kRoundTrips, true, std::vector<char>(msg_size)};
+                    auto* conn =
+                        new IoUringConn{.fd = res,
+                                        .rounds_left = kRoundTrips,
+                                        .pending_recv = true,
+                                        .buf = std::vector<char>(msg_size)}; // NOLINT(cppcoreguidelines-owning-memory)
                     auto* sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), msg_size, MSG_WAITALL);
                     io_uring_sqe_set_data(sqe, conn);
@@ -773,7 +786,7 @@ static void BM_IoUringEchoMsgSize(benchmark::State& state) {
                     io_uring_submit(&ring);
                 }
             } else {
-                auto* conn = static_cast<IoUringConn*>(ud);
+                auto* conn = static_cast<IoUringConn*>(ud); // NOLINT(cppcoreguidelines-owning-memory)
                 if (conn->pending_recv) {
                     if (res > 0) {
                         conn->pending_recv = false;
@@ -784,7 +797,7 @@ static void BM_IoUringEchoMsgSize(benchmark::State& state) {
                         io_uring_submit(&ring);
                     } else {
                         ::close(conn->fd);
-                        delete conn;
+                        delete conn; // NOLINT(cppcoreguidelines-owning-memory)
                         ++closed;
                     }
                 } else {
@@ -796,15 +809,16 @@ static void BM_IoUringEchoMsgSize(benchmark::State& state) {
                         io_uring_submit(&ring);
                     } else {
                         ::close(conn->fd);
-                        delete conn;
+                        delete conn; // NOLINT(cppcoreguidelines-owning-memory)
                         ++closed;
                     }
                 }
             }
         }
 
-        for (auto& t : clients)
+        for (auto& t : clients) {
             t.join();
+        }
         ::close(server_fd);
     }
 

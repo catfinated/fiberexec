@@ -4,8 +4,6 @@ function(add_bench name)
         fiberexec::fiberexec
         benchmark::benchmark
     )
-    # Excluded from the default 'all' target so normal builds stay fast.
-    set_target_properties(${name} PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endfunction()
 
 add_bench(bench_scheduler bench_scheduler.cpp)
