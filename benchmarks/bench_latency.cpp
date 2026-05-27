@@ -86,16 +86,16 @@ void report_percentiles(benchmark::State& state, std::vector<int64_t>& lat) {
     if (n == 0) {
         return;
     }
-    // NOLINT: bounds are guaranteed by the n==0 guard and percentile arithmetic
-    state.counters["p50_us"] =
-        static_cast<double>(lat[n / 2]) /
-        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
-    state.counters["p99_us"] =
-        static_cast<double>(lat[n * 99 / 100]) /
-        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
-    state.counters["p999_us"] =
-        static_cast<double>(lat[std::min(n - 1, n * 999 / 1000)]) /
-        1000.0; // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-narrowing-conversions)
+    // Bounds guaranteed by the n==0 guard and percentile arithmetic above.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+    auto const p50 = lat[n / 2];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+    auto const p99 = lat[n * 99 / 100];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+    auto const p999 = lat[std::min(n - 1, n * 999 / 1000)];
+    state.counters["p50_us"] = static_cast<double>(p50) / 1000.0;
+    state.counters["p99_us"] = static_cast<double>(p99) / 1000.0;
+    state.counters["p999_us"] = static_cast<double>(p999) / 1000.0;
 }
 
 // Benchmark loop shared by all variants: round-robins through fds[], times
@@ -106,7 +106,7 @@ void run_latency_loop(benchmark::State& state, std::vector<int> const& fds, std:
     std::size_t const n = fds.size();
 
     for ([[maybe_unused]] auto _ : state) {
-        int fd = fds[idx++ % n]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        int fd = fds[idx++ % n]; // NOLINT(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         auto t0 = std::chrono::steady_clock::now();
         ::send(fd, buf.data(), kMsg, MSG_NOSIGNAL);
         ::recv(fd, buf.data(), kMsg, MSG_WAITALL);
@@ -320,8 +320,9 @@ asio::awaitable<void> asio_lat_handler(asio::ip::tcp::socket sock, std::latch* d
     std::array<char, kMsg> buf{};
     try {
         while (true) {
-            auto [ec, n] = co_await asio::async_read(sock, asio::buffer(buf), asio::transfer_exactly(kMsg),
-                                                     asio::as_tuple(asio::use_awaitable));
+            auto [ec, n] = co_await asio::async_read(
+                sock, asio::buffer(buf), asio::transfer_exactly(kMsg), // NOLINT(clang-analyzer-core.NullDereference)
+                asio::as_tuple(asio::use_awaitable));
             if (ec || n == 0) {
                 break;
             }

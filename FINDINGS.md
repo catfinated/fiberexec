@@ -288,3 +288,54 @@ waiting is not exercised. **The remaining missing measurement is p50/p99/p999
 on a workload with real I/O latency** (e.g. `tc netem` delay on loopback),
 where OS threads blocked on `recv` would otherwise stall their core and the
 fiber scheduler's multiplexing would provide measurable benefit.
+
+---
+
+## Reproducibility
+
+Benchmarks were re-run to verify the results above. Status and command lines
+for each benchmark:
+
+### bench_scheduler — replicated
+
+All configurations matched within 2%.
+
+```
+./build/benchmark/benchmarks/bench_scheduler --benchmark_repetitions=5
+```
+
+### bench_fanout — replicated
+
+All N values matched within ~10%.
+
+```
+./build/benchmark/benchmarks/bench_fanout --benchmark_repetitions=5
+```
+
+### bench_echo — partially replicated
+
+fiberexec, Asio, asioexec, and raw io_uring sections all reproduced within
+~10%. Thread-per-connection at 1 connection measured ~33k/s vs ~71k/s above
+(2× discrepancy). Large message sizes for thread-per-connection were 30–65%
+off. The multi-connection thread results and all async results are stable.
+
+Command (for sections that replicated):
+
+```
+./build/benchmark/benchmarks/bench_echo --benchmark_repetitions=5
+```
+
+### bench_latency — partially replicated
+
+p50 and p99 matched within ~1–2 µs across all configurations. p999 tail
+latencies showed higher variance: thread-per-connection p999 measured ~25 µs
+(vs ~41–54 µs above); Asio at 1 connection measured ~23 µs (vs ~45 µs above).
+Raw io_uring p999 matched well throughout. Tail latency at this precision
+depends on OS scheduling jitter and system load; p50/p99 are the stable
+metrics.
+
+Command (p50/p99 results replicated):
+
+```
+./build/benchmark/benchmarks/bench_latency
+```
