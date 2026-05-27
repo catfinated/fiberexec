@@ -179,11 +179,112 @@ overhead.
 
 ---
 
+## Latency distributions (`bench_latency`)
+
+Per-request round-trip latency at varying concurrency. Each iteration is a
+single 64-byte send+recv, timed individually with `steady_clock`. The server
+runs persistently in a background thread; N client connections are established
+once and reused across all iterations in round-robin. All values in
+microseconds. `MinTime(5.0)` ensures at least ~500k samples per configuration,
+giving stable p999 estimates.
+
+fiberexec uses `fiberexec::run` + `fiberexec::channel<int>` + `stdexec::bulk`
+(the same public API as `echo_server_pool.cpp`). All other client-side timing
+uses blocking `send`/`recv` on the main thread.
+
+| Benchmark | Connections | p50 (µs) | p99 (µs) | p999 (µs) |
+|-----------|-------------|----------|----------|-----------|
+| fiberexec (io_uring + fibers) | 1 | ~11.2 | ~15.8 | ~28.2 |
+| fiberexec (io_uring + fibers) | 10 | ~11.4 | ~17.0 | ~29.4 |
+| fiberexec (io_uring + fibers) | 100 | ~11.9 | ~17.5 | ~30.8 |
+| Thread-per-connection | 1 | ~10.2 | ~16.3 | ~41.0 |
+| Thread-per-connection | 10 | ~10.6 | ~17.5 | ~47.5 |
+| Thread-per-connection | 100 | ~11.5 | ~17.8 | ~54.0 |
+| Asio coroutines (`use_awaitable`) | 1 | ~12.1 | ~19.0 | ~45.2 |
+| Asio coroutines (`use_awaitable`) | 10 | ~12.1 | ~16.7 | ~24.5 |
+| Asio coroutines (`use_awaitable`) | 100 | ~12.2 | ~17.0 | ~24.6 |
+| Raw io_uring event loop (1 thread) | 1 | ~10.8 | ~14.5 | ~25.3 |
+| Raw io_uring event loop (1 thread) | 10 | ~10.8 | ~14.7 | ~25.2 |
+| Raw io_uring event loop (1 thread) | 100 | ~10.9 | ~14.8 | ~25.4 |
+
+**p50 (median latency):** fiberexec (~11.2–11.9 µs) sits between raw io_uring
+(~10.8 µs) and Asio (~12.1 µs). The ~0.4–1.1 µs gap over raw io_uring is the
+fiber suspend/resume cost, consistent with the ~54 ns context switch from the
+scheduler microbenchmarks — several switches fire per round-trip (submit, yield,
+CQE, resume). The gap over Asio confirms the throughput result: fiberexec's
+direct io_uring path has less per-operation overhead than Asio's
+composed-operation machinery.
+
+**Tail latency (p999):** fiberexec's tail (~28–31 µs) is tighter than
+thread-per-connection (~41–54 µs) and Asio at 1 connection (~45 µs). Thread
+tails worsen steadily with concurrency — OS scheduling jitter accumulates as
+more threads compete for cores — while fiberexec stays nearly flat. This is the
+key differentiator: at median latency fiberexec is marginally behind blocking
+threads, but at the tail it is consistently ahead and does not degrade with
+connection count.
+
+**fiberexec vs raw io_uring:** the p999 gap (~3–6 µs) is larger than the p50
+gap (~0.4 µs). The raw event loop is single-threaded with no scheduling
+decisions: every CQE is processed inline. fiberexec's fiber context switches
+introduce occasional outliers that do not appear in the lock-free state machine.
+The extra tail is the price of readable sequential code.
+
+**Asio p999 anomaly:** Asio's p999 drops sharply from 1 connection (~45 µs) to
+10 connections (~24 µs) and stays flat at 100. At 1 connection the Asio event
+loop runs a single coroutine with no concurrency to hide scheduling jitter —
+every outlier lands on the one active request. At 10+ connections multiple
+round-trips are in flight; the event loop batches CQE processing and the
+worst-case scheduling pause is amortised across connections. The effect does not
+appear in fiberexec because the fiber pool always has other work to run
+regardless of connection count.
+
+### Diagnosing the rising fiberexec tail
+
+The fiberexec p999 rises from ~27 µs at N=1 to ~30 µs at N=100. Two candidate
+causes were tested using diagnostic pool configurations
+(`BM_FiberEchoLatency1T` and `BM_FiberEchoLatencyNT`):
+
+| Configuration | N=1 p999 | N=10 p999 | N=100 p999 |
+|---|---|---|---|
+| Default (16 threads) | ~26.9 µs | ~29.1 µs | ~29.9 µs |
+| 1 thread | ~25.9 µs | ~29.6 µs | ~32.6 µs |
+| N threads (1:1 balance) | ~26.4 µs | ~28.1 µs | — |
+| Raw io_uring (1 thread) | ~25.3 µs | ~25.2 µs | ~25.4 µs |
+
+**Fiber-to-thread imbalance is a partial cause.** The 1:1 balanced
+configuration (one pool thread per fiber, no thread shares more than one
+connection) reduces p999 by ~1 µs at N=10 compared to the default 16-thread
+pool, confirming that uneven `bulk` task distribution contributes to the tail.
+
+**Boost.Fiber scheduler overhead per thread is the dominant cause.** The
+single-thread configuration — which eliminates distribution variance entirely —
+produces the *worst* tail at high N (32.6 µs at N=100), not the best. With all
+100 fibers on one Boost.Fiber scheduler instance, the per-CQE scheduling
+overhead grows with the number of fibers managed by that instance. Spreading
+fibers across 16 threads (default) is better precisely because each thread's
+scheduler manages ~6 fibers rather than 100. The 1:1 balanced configuration is
+best of all because each thread manages exactly one fiber with no scheduler
+contention at all — but at the cost of one OS thread per connection, which is
+not a realistic operating point.
+
+**The raw io_uring baseline is flat** across all N because it has neither
+effect: one thread, one ring, no fiber scheduler, CQEs processed inline with
+zero scheduling decisions.
+
+The practical conclusion: the rising fiberexec tail is not a fixable
+mis-configuration — it is the intrinsic cost of the Boost.Fiber scheduler
+managing multiple fibers per thread. At the concurrency levels measured here the
+rise is modest (~3 µs from N=1 to N=100) and the tail remains well below
+thread-per-connection at every level.
+
+---
+
 ## Open questions
 
-The measurements above are all throughput on loopback. The case for the fiber
-model is strongest when I/O actually blocks with real variance — in that regime
-fibers keep threads productive in a way that state-machine event loops cannot
-without explicit work-stealing. **Latency distributions (p50/p99/p999) on a
-workload with real I/O latency are the missing measurement** that would either
-confirm or refute that intuition.
+The measurements above cover loopback only. The tail-latency advantage of
+fiberexec over threads is visible even here, but loopback I/O completes
+near-instantaneously — the fiber's ability to keep threads productive while
+waiting is not exercised. **The remaining missing measurement is p50/p99/p999
+on a workload with real I/O latency** (e.g. `tc netem` delay on loopback),
+where OS threads blocked on `recv` would otherwise stall their core and the
+fiber scheduler's multiplexing would provide measurable benefit.

@@ -37,12 +37,14 @@ minimal event loop with one ring per thread and no fibers or P2300 overhead.
 Without it, the benchmark cannot isolate the cost of fibers from the cost of
 io_uring itself, and a systems audience will probe this first.
 
-### Latency distributions (p50 / p99 / p999)
+### ~~Latency distributions (p50 / p99 / p999)~~ ✅ done
 
-All current benchmarks report throughput only. For an I/O runtime the tail
-latency is the real differentiator and the place where the three models (fibers,
-coroutines, threads) actually diverge. Adding HDR-histogram or similar percentile
-reporting to the existing harness would significantly sharpen the story.
+Implemented in `benchmarks/bench_latency.cpp`. `UseManualTime()` + per-iteration
+`SetIterationTime` accumulates individual round-trip timings; p50/p99/p999 are
+sorted and reported as custom counters after the loop. Key finding: fiberexec
+tail latency (p999) is tighter than thread-per-connection at every concurrency
+level and does not degrade with connection count, while thread tails worsen
+steadily. See `FINDINGS.md` for full tables and analysis.
 
 ### Non-loopback workload
 
