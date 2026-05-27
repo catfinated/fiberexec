@@ -19,9 +19,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <liburing.h>
+
 #include <array>
 #include <cstdint>
 #include <latch>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -77,10 +80,10 @@ void run_blocking_client(sockaddr_in const& server_addr) {
 void fiber_conn_handler(int conn_fd) {
     std::array<char, kMsgSize> buf{};
     for (int i = 0; i < kRoundTrips; ++i) {
-        ssize_t n = fiberexec::async_recv(conn_fd, buf.data(), kMsgSize, MSG_WAITALL);
-        fiberexec::async_send(conn_fd, buf.data(), static_cast<std::size_t>(n), MSG_NOSIGNAL);
+        ssize_t n = fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{buf}), MSG_WAITALL);
+        fiberexec::async_send(conn_fd, std::as_bytes(std::span{buf.data(), static_cast<std::size_t>(n)}), MSG_NOSIGNAL);
     }
-    ::close(conn_fd);
+    fiberexec::async_close(conn_fd);
 }
 
 // Server-side handler for the thread echo baseline.
@@ -156,10 +159,10 @@ void run_blocking_client_dyn(sockaddr_in const& server_addr, std::size_t msg_siz
 void fiber_conn_handler_dyn(int conn_fd, std::size_t msg_size) {
     std::vector<char> buf(msg_size);
     for (int i = 0; i < kRoundTrips; ++i) {
-        fiberexec::async_recv(conn_fd, buf.data(), msg_size, MSG_WAITALL);
-        fiberexec::async_send(conn_fd, buf.data(), msg_size, MSG_NOSIGNAL);
+        fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{buf}), MSG_WAITALL);
+        fiberexec::async_send(conn_fd, std::as_bytes(std::span{buf}), MSG_NOSIGNAL);
     }
-    ::close(conn_fd);
+    fiberexec::async_close(conn_fd);
 }
 
 void thread_conn_handler_dyn(int conn_fd, std::size_t msg_size) {
@@ -190,6 +193,28 @@ asio::awaitable<void> asio_accept_loop_dyn(asio::ip::tcp::acceptor* acc, int64_t
         asio::co_spawn(acc->get_executor(), asio_conn_handler_dyn(std::move(sock), msg_size), asio::detached);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Raw io_uring baseline helpers
+//
+// A minimal state machine for an echo connection driven purely by io_uring,
+// with no fibers, coroutines, or P2300 overhead.  The pending operation
+// (recv or send) is stored directly in the connection struct so the SQE
+// user_data slot holds a plain IoUringConn* with no encoding tricks.
+//
+// A static sentinel address marks accept CQEs so the event loop can
+// distinguish them from connection CQEs without an extra allocation.
+// ---------------------------------------------------------------------------
+
+struct IoUringConn {
+    int fd;
+    int rounds_left;
+    bool pending_recv; // true while a recv is in flight, false while a send is
+    std::vector<char> buf;
+};
+
+// Sentinel: its address is distinct from any heap-allocated IoUringConn*.
+int g_accept_sentinel{};
 
 } // namespace
 
@@ -262,6 +287,52 @@ static void BM_FiberEchoServer(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * num_conns * kRoundTrips);
 }
 BENCHMARK(BM_FiberEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime();
+
+// ---------------------------------------------------------------------------
+// BM_FiberEchoServer1T
+//
+// Same as BM_FiberEchoServer but with a single worker thread, matching the
+// parallelism of BM_IoUringEchoServer.  The delta between these two isolates
+// the pure cost of the Boost.Fiber + P2300 sender/receiver layer over a raw
+// io_uring event loop.  The delta between BM_FiberEchoServer1T and
+// BM_FiberEchoServer shows the benefit of adding more threads.
+// ---------------------------------------------------------------------------
+static void BM_FiberEchoServer1T(benchmark::State& state) {
+    int64_t const num_conns = state.range(0);
+    fiberexec::context ctx{1};
+
+    for ([[maybe_unused]] auto _ : state) {
+        int server_fd = make_server_socket();
+        sockaddr_in const addr = bound_addr(server_fd);
+        std::latch done{num_conns};
+
+        fiberexec::detail::schedule_task(ctx.pool(), [&ctx, server_fd, num_conns, &done] {
+            for (int64_t i = 0; i < num_conns; ++i) {
+                int conn = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                if (conn < 0)
+                    break;
+                fiberexec::detail::schedule_task(ctx.pool(), [conn, &done] {
+                    fiber_conn_handler(conn);
+                    done.count_down();
+                });
+            }
+        });
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(num_conns));
+        for (int64_t i = 0; i < num_conns; ++i) {
+            clients.emplace_back(run_blocking_client, std::cref(addr));
+        }
+        for (auto& t : clients)
+            t.join();
+
+        done.wait();
+        ::close(server_fd);
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_conns * kRoundTrips);
+}
+BENCHMARK(BM_FiberEchoServer1T)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime();
 
 // ---------------------------------------------------------------------------
 // BM_ThreadEchoServer
@@ -408,6 +479,108 @@ static void BM_AsioExecEchoServer(benchmark::State& state) {
 BENCHMARK(BM_AsioExecEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime();
 
 // ---------------------------------------------------------------------------
+// BM_IoUringEchoServer
+//
+// Baseline: a hand-rolled single-ring io_uring event loop with no fibers and
+// no P2300 overhead.  Each accepted connection is represented by an IoUringConn
+// that records which operation is in flight; the SQE user_data slot holds a
+// plain pointer to it.  On each CQE the event loop transitions the connection:
+// recv complete → submit send, send complete → submit recv (or close).
+//
+// One ring, one event-loop thread.  fiberexec uses hardware_concurrency()
+// threads; the gap between the two at low concurrency isolates the fiber+P2300
+// overhead, while the gap at high concurrency reflects the parallelism
+// difference.  Both effects are intentional and documented.
+// ---------------------------------------------------------------------------
+static void BM_IoUringEchoServer(benchmark::State& state) {
+    int64_t const num_conns = state.range(0);
+
+    io_uring ring{};
+    io_uring_queue_init(256, &ring, 0);
+
+    for ([[maybe_unused]] auto _ : state) {
+        int server_fd = make_server_socket();
+        sockaddr_in const addr = bound_addr(server_fd);
+
+        {
+            auto* sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_accept(sqe, server_fd, nullptr, nullptr, 0);
+            io_uring_sqe_set_data(sqe, &g_accept_sentinel);
+            io_uring_submit(&ring);
+        }
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(num_conns));
+        for (int64_t i = 0; i < num_conns; ++i) {
+            clients.emplace_back(run_blocking_client, std::cref(addr));
+        }
+
+        int64_t accepted = 0;
+        int64_t closed = 0;
+
+        while (closed < num_conns) {
+            io_uring_cqe* cqe = nullptr;
+            io_uring_wait_cqe(&ring, &cqe);
+            int const res = cqe->res;
+            void* const ud = io_uring_cqe_get_data(cqe);
+            io_uring_cqe_seen(&ring, cqe);
+
+            if (ud == static_cast<void*>(&g_accept_sentinel)) {
+                if (res >= 0) {
+                    ++accepted;
+                    auto* conn = new IoUringConn{res, kRoundTrips, true, std::vector<char>(kMsgSize)};
+                    auto* sqe = io_uring_get_sqe(&ring);
+                    io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), kMsgSize, MSG_WAITALL);
+                    io_uring_sqe_set_data(sqe, conn);
+                    if (accepted < num_conns) {
+                        auto* sqe2 = io_uring_get_sqe(&ring);
+                        io_uring_prep_accept(sqe2, server_fd, nullptr, nullptr, 0);
+                        io_uring_sqe_set_data(sqe2, &g_accept_sentinel);
+                    }
+                    io_uring_submit(&ring);
+                }
+            } else {
+                auto* conn = static_cast<IoUringConn*>(ud);
+                if (conn->pending_recv) {
+                    if (res > 0) {
+                        conn->pending_recv = false;
+                        auto* sqe = io_uring_get_sqe(&ring);
+                        io_uring_prep_send(sqe, conn->fd, conn->buf.data(), static_cast<std::size_t>(res),
+                                           MSG_NOSIGNAL);
+                        io_uring_sqe_set_data(sqe, conn);
+                        io_uring_submit(&ring);
+                    } else {
+                        ::close(conn->fd);
+                        delete conn;
+                        ++closed;
+                    }
+                } else {
+                    if (--conn->rounds_left > 0) {
+                        conn->pending_recv = true;
+                        auto* sqe = io_uring_get_sqe(&ring);
+                        io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), kMsgSize, MSG_WAITALL);
+                        io_uring_sqe_set_data(sqe, conn);
+                        io_uring_submit(&ring);
+                    } else {
+                        ::close(conn->fd);
+                        delete conn;
+                        ++closed;
+                    }
+                }
+            }
+        }
+
+        for (auto& t : clients)
+            t.join();
+        ::close(server_fd);
+    }
+
+    state.SetItemsProcessed(state.iterations() * num_conns * kRoundTrips);
+    io_uring_queue_exit(&ring);
+}
+BENCHMARK(BM_IoUringEchoServer)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->UseRealTime();
+
+// ---------------------------------------------------------------------------
 // Message-size sweep benchmarks (BM_*EchoMsgSize)
 //
 // Fix concurrency at kMsgSizeBenchConns (10) — the level where fiberexec shows
@@ -551,6 +724,94 @@ static void BM_AsioExecEchoMsgSize(benchmark::State& state) {
     state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
 }
 BENCHMARK(BM_AsioExecEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
+
+static void BM_IoUringEchoMsgSize(benchmark::State& state) {
+    auto const msg_size = static_cast<std::size_t>(state.range(0));
+
+    io_uring ring{};
+    io_uring_queue_init(256, &ring, 0);
+
+    for ([[maybe_unused]] auto _ : state) {
+        int server_fd = make_server_socket();
+        sockaddr_in const addr = bound_addr(server_fd);
+
+        {
+            auto* sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_accept(sqe, server_fd, nullptr, nullptr, 0);
+            io_uring_sqe_set_data(sqe, &g_accept_sentinel);
+            io_uring_submit(&ring);
+        }
+
+        std::vector<std::thread> clients;
+        clients.reserve(static_cast<std::size_t>(kMsgSizeBenchConns));
+        for (int64_t i = 0; i < kMsgSizeBenchConns; ++i) {
+            clients.emplace_back(run_blocking_client_dyn, std::cref(addr), msg_size);
+        }
+
+        int64_t accepted = 0;
+        int64_t closed = 0;
+
+        while (closed < kMsgSizeBenchConns) {
+            io_uring_cqe* cqe = nullptr;
+            io_uring_wait_cqe(&ring, &cqe);
+            int const res = cqe->res;
+            void* const ud = io_uring_cqe_get_data(cqe);
+            io_uring_cqe_seen(&ring, cqe);
+
+            if (ud == static_cast<void*>(&g_accept_sentinel)) {
+                if (res >= 0) {
+                    ++accepted;
+                    auto* conn = new IoUringConn{res, kRoundTrips, true, std::vector<char>(msg_size)};
+                    auto* sqe = io_uring_get_sqe(&ring);
+                    io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), msg_size, MSG_WAITALL);
+                    io_uring_sqe_set_data(sqe, conn);
+                    if (accepted < kMsgSizeBenchConns) {
+                        auto* sqe2 = io_uring_get_sqe(&ring);
+                        io_uring_prep_accept(sqe2, server_fd, nullptr, nullptr, 0);
+                        io_uring_sqe_set_data(sqe2, &g_accept_sentinel);
+                    }
+                    io_uring_submit(&ring);
+                }
+            } else {
+                auto* conn = static_cast<IoUringConn*>(ud);
+                if (conn->pending_recv) {
+                    if (res > 0) {
+                        conn->pending_recv = false;
+                        auto* sqe = io_uring_get_sqe(&ring);
+                        io_uring_prep_send(sqe, conn->fd, conn->buf.data(), static_cast<std::size_t>(res),
+                                           MSG_NOSIGNAL);
+                        io_uring_sqe_set_data(sqe, conn);
+                        io_uring_submit(&ring);
+                    } else {
+                        ::close(conn->fd);
+                        delete conn;
+                        ++closed;
+                    }
+                } else {
+                    if (--conn->rounds_left > 0) {
+                        conn->pending_recv = true;
+                        auto* sqe = io_uring_get_sqe(&ring);
+                        io_uring_prep_recv(sqe, conn->fd, conn->buf.data(), msg_size, MSG_WAITALL);
+                        io_uring_sqe_set_data(sqe, conn);
+                        io_uring_submit(&ring);
+                    } else {
+                        ::close(conn->fd);
+                        delete conn;
+                        ++closed;
+                    }
+                }
+            }
+        }
+
+        for (auto& t : clients)
+            t.join();
+        ::close(server_fd);
+    }
+
+    state.SetBytesProcessed(state.iterations() * kMsgSizeBenchConns * kRoundTrips * state.range(0));
+    io_uring_queue_exit(&ring);
+}
+BENCHMARK(BM_IoUringEchoMsgSize)->Arg(64)->Arg(512)->Arg(4096)->Arg(65536)->UseRealTime();
 
 // The 1000-connection benchmark opens ~2000 fds simultaneously (1000 client
 // sockets + 1000 accepted fds + io_uring/eventfd overhead per thread). The

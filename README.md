@@ -19,12 +19,6 @@ A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300)
   - [Run the tests](#run-the-tests)
   - [Run the examples](#run-the-examples)
 - [Benchmarks](#benchmarks)
-  - [Building](#building-1)
-  - [Running](#running)
-  - [Scheduler microbenchmarks (bench\_scheduler)](#scheduler-microbenchmarks-bench_scheduler)
-  - [Echo server benchmarks (bench\_echo)](#echo-server-benchmarks-bench_echo)
-  - [Message-size sweep (bench\_echo, BM\_\*EchoMsgSize)](#message-size-sweep-bench_echo-bm_echomsgsize)
-  - [Fan-out benchmarks (bench\_fanout)](#fan-out-benchmarks-bench_fanout)
 - [Status](#status)
 - [Dependencies](#dependencies)
 - [License](#license)
@@ -398,6 +392,7 @@ cmake --build build/benchmark --target bench_scheduler bench_echo bench_fanout
 ```sh
 ./build/benchmark/benchmarks/bench_scheduler
 ./build/benchmark/benchmarks/bench_echo
+./build/benchmark/benchmarks/bench_fanout
 ```
 
 Pass `--benchmark_repetitions=N` to collect multiple runs and report mean /
@@ -413,140 +408,9 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
     --benchmark_report_aggregates_only=true
 ```
 
-### Scheduler microbenchmarks (`bench_scheduler`)
-
-Measured on an AMD Ryzen 7 5700X (8-core, 16 logical, ~4.7 GHz), Linux
-6.x, Clang, `-O3`. All benchmarks use `UseRealTime()` — fiber work runs on
-pool threads while the benchmark thread sleeps in `sync_wait`, so wall time
-is the only meaningful measure.
-
-| Benchmark | Wall time / iter | Throughput |
-|-----------|-----------------|------------|
-| Fiber context switch (2 fibers, 10 000 round-trips) | ~1.09 ms | ~18.4 M switches/s · **~54 ns/switch** |
-| Thread context switch (semaphore ping-pong, 10 000 round-trips) | ~3.32 ms | ~6.0 M switches/s · **~166 ns/switch** |
-| `run(sched, noop)` round-trip | **~6.5 µs** | — |
-| `schedule(sched) \| then(noop)` round-trip | **~6.5 µs** | — |
-
-**Fiber vs thread context switch**: fiber switches are ~3× faster than a
-semaphore-gated thread ping-pong (~54 ns vs ~166 ns per switch). Both
-measurements count two switches per "item" (A→B and B→A), so the raw
-switch latency is half the per-item figure.
-
-**Schedule overhead**: a full `run(sched, fn)` round-trip — enqueue task,
-pool thread picks it up, fiber switch, execute noop, set_value, sync_wait
-unblocks — costs ~6.5 µs. `schedule | then` is within noise of `run`,
-confirming the extra receiver machinery in `run` adds nothing measurable.
-
-### Echo server benchmarks (`bench_echo`)
-
-Four server implementations measured side-by-side. Each iteration opens N
-concurrent connections, each exchanging 100 round-trips of a 64-byte payload
-over loopback TCP. Clients are always OS threads with blocking syscalls; only
-the server side differs. Throughput is total round-trips per second across all
-connections.
-
-| Benchmark | Connections | Wall time / iter | Throughput |
-|-----------|-------------|-----------------|------------|
-| fiberexec (io_uring fibers) | 1 | ~1.35 ms | ~74.0k round-trips/s |
-| fiberexec (io_uring fibers) | 10 | ~2.35 ms | ~425k round-trips/s |
-| fiberexec (io_uring fibers) | 100 | ~15.7 ms | ~638k round-trips/s |
-| fiberexec (io_uring fibers) | 1000 | ~140 ms | ~716k round-trips/s |
-| Thread-per-connection | 1 | ~1.27 ms (median; 35% CV) | ~71.3k round-trips/s |
-| Thread-per-connection | 10 | ~3.89 ms | ~257k round-trips/s |
-| Thread-per-connection | 100 | ~16.5 ms | ~605k round-trips/s |
-| Thread-per-connection | 1000 | — (skipped; ~2000 OS threads) | — |
-| Asio coroutines (`use_awaitable`) | 1 | ~3.09 ms | ~32.4k round-trips/s |
-| Asio coroutines (`use_awaitable`) | 10 | ~4.65 ms | ~215k round-trips/s |
-| Asio coroutines (`use_awaitable`) | 100 | ~18.9 ms | ~530k round-trips/s |
-| Asio coroutines (`use_awaitable`) | 1000 | ~161 ms | ~620k round-trips/s |
-| asioexec (`exec::asio` + `use_sender`) | 1 | ~3.10 ms | ~32.3k round-trips/s |
-| asioexec (`exec::asio` + `use_sender`) | 10 | ~4.70 ms | ~213k round-trips/s |
-| asioexec (`exec::asio` + `use_sender`) | 100 | ~19.3 ms | ~518k round-trips/s |
-| asioexec (`exec::asio` + `use_sender`) | 1000 | ~161 ms | ~621k round-trips/s |
-
-**Asio vs asioexec** are within 1–2% at every concurrency level. The extra
-`use_sender` dispatch in the accept path adds nothing measurable relative to
-the I/O cost of the connections themselves. This confirms the P2300 composition
-layer imposes no runtime penalty.
-
-**fiberexec vs Asio**: fiber wins at every concurrency level — 2.3× faster at
-1 connection, 2.0× at 10, 1.2× at 100 and 1000. The gap is largest at low
-concurrency where per-round-trip latency dominates. Asio's coroutine path
-(`co_await async_read → co_await async_write`) involves more dispatch layers per
-operation (async_result machinery, executor dispatch, composed-operation
-resumption) than fiberexec's direct io_uring path (`io_uring_submit → CQE →
-fiber resume`). At high concurrency the gap narrows as throughput becomes
-bandwidth-bound rather than latency-bound.
-
-**Thread-per-connection** lies between the two async models at 10+ connections,
-and is the only approach that cannot reach 1000 concurrent connections (~2000
-OS threads required). Both fiberexec and Asio scale to 1000 connections on a
-fixed pool of 16 OS threads.
-
-**Why there is no raw io_uring thread-per-connection baseline**: a naive version
-that creates one `io_uring` ring per connection is not a meaningful comparison —
-ring setup (a syscall plus several mmaps) costs more than the blocking syscalls it
-replaces, producing numbers worse than plain `recv`/`send`. A correct raw io_uring
-baseline would need a thread pool where each thread owns one long-lived ring and
-multiplexes many connections over it, processing CQEs in a loop and dispatching
-completions by connection ID. That design *is* fiberexec's architecture, minus the
-fiber scheduler: the same ring-per-OS-thread structure, the same event loop, the
-same fan-out of connections across threads. The only difference is that fiberexec
-uses fibers to express each connection's recv→send→recv cycle as straight-line code
-rather than an explicit state machine. Asio's `io_context` is also this design, so
-the Asio benchmarks already cover this point in the design space.
-
-### Message-size sweep (`bench_echo`, `BM_*EchoMsgSize`)
-
-Fixed concurrency at 10 connections; message size varies across 64 B, 512 B,
-4 KB, and 64 KB. Throughput is in MiB/s or GiB/s (one direction; multiply by 2
-for round-trip bandwidth). Median values across 3 repetitions.
-
-| Benchmark | 64 B | 512 B | 4 KB | 64 KB |
-|-----------|------|-------|------|-------|
-| fiberexec (io_uring fibers) | ~25.6 MiB/s | ~204 MiB/s | ~1.45 GiB/s | ~9.8 GiB/s |
-| Thread-per-connection | ~27.0 MiB/s | ~226 MiB/s | ~1.66 GiB/s | ~12.7 GiB/s |
-| Asio coroutines (`use_awaitable`) | ~14.1 MiB/s | ~102 MiB/s | ~800 MiB/s | ~4.06 GiB/s |
-| asioexec (`exec::asio` + `use_sender`) | ~13.0 MiB/s | ~103 MiB/s | ~800 MiB/s | ~4.00 GiB/s |
-
-**fiberexec vs Asio**: the advantage does not narrow with larger messages — it
-holds at ~1.8–2× from 64 B through 4 KB and widens to ~2.4× at 64 KB. The
-narrowing hypothesis (per-op dispatch overhead becomes negligible at large
-payloads) does not hold. Asio's `async_read` composed-operation machinery adds
-overhead that becomes more visible when 10 connections simultaneously move large
-payloads and compete for the event loop.
-
-**fiberexec vs thread-per-connection**: blocking threads are faster at every
-message size (5–30% ahead, gap widening with payload). The reason is not partial
-reads — adding `MSG_WAITALL` to `async_recv` produces identical numbers because
-data arrives atomically on loopback regardless. The gap is the io_uring
-submission overhead: blocking `recv`/`send` returns immediately when data is
-already in the socket buffer, while fiberexec always pays the SQE→CQE
-round-trip even when the data is ready. io_uring's async path is most beneficial
-when operations actually need to wait; for bandwidth-saturated loopback the
-synchronous path wins.
-
-**Asio vs asioexec** stay within 1–3% at all message sizes, consistent with
-the concurrency-sweep results.
-
-### Fan-out benchmarks (`bench_fanout`)
-
-Compares `stdexec::bulk` on `fiberexec::scheduler` against `stdexec::bulk` on `exec::static_thread_pool`. Both use identical P2300 code; only the scheduler differs. N socketpairs are pre-created; one byte is written per pair per iteration, then N concurrent readers (fibers or thread-pool tasks) drain them via `bulk`. This isolates scheduler fan-out overhead from I/O latency.
-
-16 × 4.7 GHz cores, 4-thread pool, 5 repetitions (`--benchmark_repetitions=5 --benchmark_report_aggregates_only=true`):
-
-| N | Fiber (real) | Thread (real) | Fiber items/s | Thread items/s |
-|---|---|---|---|---|
-| 2 | 13.0 µs | 10.9 µs | 154k/s | 183k/s |
-| 8 | 23.6 µs | 17.2 µs | 339k/s | 465k/s |
-| 32 | 64.9 µs | 39.2 µs | 493k/s | 816k/s |
-| 128 | 246 µs | 131 µs | 520k/s | 980k/s |
-
-**Threads win, and the gap widens with N.** CPU time is nearly identical at every N (both ~101 µs at N=128); all the difference is coordination overhead. The real/CPU ratio is 2.4× for fibers vs 1.3× for threads at N=128, reflecting io_uring SQE submission, CQE delivery, and fiber context-switch cost on each of the N indices.
-
-The core reason is that this benchmark pre-fills the socketpairs before each iteration, so every read completes immediately — there is no actual I/O latency to overlap. The fiber's io_uring round-trip is pure overhead with no benefit in this scenario. At N=128, each iteration submits 128 SQEs and harvests 128 CQEs; the thread-pool version calls `::read` 128 times on data that is already in the socket buffer.
-
-The fiber advantage materialises when I/O actually blocks: pool threads that would otherwise stall waiting for data can instead run other fibers, keeping all cores productive. That is precisely what `bench_echo` measures. This benchmark deliberately isolates the opposite case — zero-latency reads — to characterise the raw scheduling overhead.
+See [FINDINGS.md](FINDINGS.md) for full results and analysis, including the
+raw io_uring baseline comparison that isolates the fiber+P2300 overhead from
+the io_uring machinery itself.
 
 ## Status
 

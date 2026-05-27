@@ -60,14 +60,23 @@ Fixed message size (64 bytes). Vary the number of concurrent connections:
 1, 10, 100, 1000. Measure throughput (round-trips per second) at each level.
 
 ```
-BM_FiberEchoServer/1    BM_FiberEchoServer/10    BM_FiberEchoServer/100    BM_FiberEchoServer/1000
-BM_ThreadEchoServer/1   BM_ThreadEchoServer/10   BM_ThreadEchoServer/100
-BM_AsioEchoServer/1     BM_AsioEchoServer/10     BM_AsioEchoServer/100     BM_AsioEchoServer/1000
-BM_AsioExecEchoServer/1 BM_AsioExecEchoServer/10 BM_AsioExecEchoServer/100 BM_AsioExecEchoServer/1000
+BM_FiberEchoServer/1      BM_FiberEchoServer/10      BM_FiberEchoServer/100      BM_FiberEchoServer/1000
+BM_FiberEchoServer1T/1    BM_FiberEchoServer1T/10    BM_FiberEchoServer1T/100    BM_FiberEchoServer1T/1000
+BM_IoUringEchoServer/1    BM_IoUringEchoServer/10    BM_IoUringEchoServer/100    BM_IoUringEchoServer/1000
+BM_ThreadEchoServer/1     BM_ThreadEchoServer/10     BM_ThreadEchoServer/100
+BM_AsioEchoServer/1       BM_AsioEchoServer/10       BM_AsioEchoServer/100       BM_AsioEchoServer/1000
+BM_AsioExecEchoServer/1   BM_AsioExecEchoServer/10   BM_AsioExecEchoServer/100   BM_AsioExecEchoServer/1000
 ```
 
 Baselines:
 
+- **Raw io_uring event loop** (`BM_IoUringEchoServer`): single ring, single
+  thread, no fibers, no P2300. Each connection is an explicit recv/send state
+  machine. This is the minimum possible overhead for an io_uring-based server.
+- **fiberexec pinned to 1 thread** (`BM_FiberEchoServer1T`): same as
+  `BM_FiberEchoServer` but `ctx{1}` — matched parallelism for a direct
+  comparison against the raw baseline. The delta between the two is the pure
+  cost of Boost.Fiber suspension plus the P2300 sender/receiver machinery.
 - **Thread-per-connection with blocking syscalls** (`BM_ThreadEchoServer`):
   one `std::thread` per connection, plain `recv`/`send`. Shows where fibers
   help: at high concurrency, thread creation and stack overhead become the
@@ -78,13 +87,6 @@ Baselines:
 - **asioexec** (`BM_AsioExecEchoServer`): `exec::asio::asio_thread_pool` with
   `use_sender` in the accept path. Tests whether the P2300 composition layer
   adds measurable overhead over plain Asio.
-
-**Why there is no raw io_uring baseline**: a correct raw io_uring server needs
-a thread pool where each thread owns one long-lived ring and multiplexes many
-connections over it — the same ring-per-OS-thread structure fiberexec uses.
-The only real difference from fiberexec would be an explicit connection state
-machine instead of fibers. Asio's `io_context` implements this design, so the
-Asio benchmarks already cover this point in the design space.
 
 ### 2b. Echo server at varying message sizes
 
