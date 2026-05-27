@@ -1,6 +1,6 @@
 # fiberexec
 
-A fiber-based scheduler for [stdexec](https://github.com/NVIDIA/stdexec) (P2300), built on [Boost.Fiber](https://github.com/boostorg/fiber).
+io_uring async I/O with fiber ergonomics and P2300 structured concurrency.
 
 ## Table of Contents
 
