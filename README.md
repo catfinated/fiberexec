@@ -46,6 +46,8 @@ Several prior projects are worth knowing about. [pika](https://github.com/pika-o
 | stdexec | | ✓ (PoC) | ✓ |
 | fiberexec | ✓ | ✓ | ✓ |
 
+**What fiberexec is not.** It is not a general-purpose execution runtime, not a replacement for pika, Asio, stdexec, or libunifex, and not a production server framework. It is a focused experiment at one specific design point: fibers as the local execution substrate for io_uring-backed I/O, with P2300 senders as the outer composition model. The intended framing is *fibers inside, senders outside* — you write blocking-looking sequential code inside a fiber, and that fiber participates in structured concurrency as a sender. The primary deliverable is the findings: whether this model is a good one, where it wins, and where it loses.
+
 ## Background
 
 ### Fibers vs threads

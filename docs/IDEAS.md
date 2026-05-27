@@ -323,14 +323,13 @@ internal headers. This will break silently on stdexec updates. The shim should
 be isolated behind a version-pinned boundary so breakage is contained and easy
 to repair.
 
-### README scope disclaimer
+### ~~README scope disclaimer~~ ✅ done
 
-The README should state explicitly what fiberexec is not: not a general-purpose
-execution runtime, not a replacement for pika, Asio, stdexec, or libunifex. The
-framing belongs at the top: this is a focused experiment in using stackful fibers
-as the local execution substrate for io_uring-backed I/O inside a P2300-compatible
-runtime. The honest claim is "fibers inside, senders outside" rather than any
-novelty-of-components claim.
+Added a "What fiberexec is not" paragraph to the README immediately after the
+comparison table. States explicitly that it is not a general-purpose runtime or
+a replacement for pika, Asio, stdexec, or libunifex, and frames the deliverable
+as findings rather than a library. The design point is summarised as "fibers
+inside, senders outside."
 
 ### ~~Sanitizer coverage~~ ✅ done
 
