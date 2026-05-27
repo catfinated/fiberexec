@@ -66,6 +66,39 @@ int async_accept(int fd,
                  std::optional<std::chrono::nanoseconds> timeout = std::nullopt,
                  std::stop_token st = {});
 
+/// Asynchronously open a file relative to @p dirfd.
+///
+/// Submits an io_uring openat request and suspends the calling fiber until a
+/// file descriptor is ready — the OS thread is never blocked.  Must be called
+/// from a fiber running on a fiberexec worker thread.
+///
+/// @p dirfd may be AT_FDCWD to open relative to the current directory.
+/// @p flags and @p mode are passed directly to the underlying openat(2).
+/// If @p timeout is set and the open does not complete in time, throws
+/// std::system_error(ECANCELED).  If @p st is cancellable and stop is
+/// requested, also throws ECANCELED.
+///
+/// @returns The opened file descriptor (caller is responsible for closing it).
+/// @throws std::system_error on I/O failure, timeout, or cancellation.
+/// @throws std::runtime_error if called outside of a fiberexec fiber.
+int async_openat(int dirfd,
+                 char const* path,
+                 int flags,
+                 mode_t mode = 0,
+                 std::optional<std::chrono::nanoseconds> timeout = std::nullopt,
+                 std::stop_token st = {});
+
+/// Asynchronously close @p fd.
+///
+/// Submits an io_uring close request and suspends the calling fiber until the
+/// close completes — the OS thread is never blocked.  The file descriptor is
+/// consumed by this call; do not use @p fd after calling async_close.  Must be
+/// called from a fiber running on a fiberexec worker thread.
+///
+/// @throws std::system_error on I/O failure.
+/// @throws std::runtime_error if called outside of a fiberexec fiber.
+void async_close(int fd);
+
 /// Initiate a connection from @p fd to the address described by @p addr.
 ///
 /// Submits an io_uring connect request and suspends the calling fiber until

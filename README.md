@@ -292,6 +292,7 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/sync_wait_fanout
 ./build/debug/examples/channel_backpressure
 ./build/debug/examples/echo_server_pool
+./build/debug/examples/echo_to_file
 ```
 
 `parallel_gather` starts 16 producer threads each writing a value into its own
@@ -370,6 +371,13 @@ backlog and suspends the acceptor cooperatively when all workers are busy. A
 `stop_source` coordinates shutdown: the last client fires `request_stop()`,
 the accept loop catches `ECANCELED`, closes the channel, and workers drain and
 exit cleanly.
+
+`echo_to_file` extends the pool pattern with `async_openat` and `async_close`:
+instead of echoing data back to the client, each worker fiber asynchronously
+opens a dedicated log file (`connection_N.log`), writes all received bytes to
+it, then asynchronously closes it. The number of connections is not known
+upfront. From inside the fiber, open, write, and close are three sequential
+statements that each yield the fiber without blocking the OS thread.
 
 ## Benchmarks
 

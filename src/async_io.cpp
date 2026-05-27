@@ -78,6 +78,34 @@ int async_accept(
     return res;
 }
 
+int async_openat(int dirfd,
+                 char const* path,
+                 int flags,
+                 mode_t mode,
+                 std::optional<std::chrono::nanoseconds> timeout,
+                 std::stop_token st) {
+    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_openat"));
+    io_uring_prep_openat(sqe, dirfd, path, flags, mode);
+    int const res = dispatch(sqe, timeout, std::move(st));
+    if (res < 0) {
+        throw std::system_error(-res, std::system_category(), "async_openat");
+    }
+    return res;
+}
+
+void async_close(int fd) {
+    io_uring* ring = detail::current_ring();
+    if (ring == nullptr) {
+        throw std::runtime_error("async_close called outside of a fiberexec fiber");
+    }
+    io_uring_sqe* sqe = io_uring_get_sqe(ring);
+    io_uring_prep_close(sqe, fd);
+    int const res = detail::submit_and_wait(sqe, {});
+    if (res < 0) {
+        throw std::system_error(-res, std::system_category(), "async_close");
+    }
+}
+
 void async_connect(int fd,
                    sockaddr const* addr,
                    socklen_t addrlen,
