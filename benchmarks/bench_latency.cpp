@@ -319,10 +319,10 @@ BENCHMARK(BM_ThreadEchoLatency)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->Min
 asio::awaitable<void> asio_lat_handler(asio::ip::tcp::socket sock, std::latch* done) {
     std::array<char, kMsg> buf{};
     try {
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
         while (true) {
-            auto [ec, n] = co_await asio::async_read(
-                sock, asio::buffer(buf), asio::transfer_exactly(kMsg), // NOLINT(clang-analyzer-core.NullDereference)
-                asio::as_tuple(asio::use_awaitable));
+            auto [ec, n] = co_await asio::async_read(sock, asio::buffer(buf), asio::transfer_exactly(kMsg),
+                                                     asio::as_tuple(asio::use_awaitable));
             if (ec || n == 0) {
                 break;
             }
