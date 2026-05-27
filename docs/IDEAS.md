@@ -26,20 +26,15 @@ a fiberexec-namespaced `channel_op_status` enum. See
 
 ## io_uring features
 
-### Timeouts on individual async ops
+### ~~Timeouts on individual async ops~~ ✅ done
 
-`IORING_OP_LINK_TIMEOUT` lets you attach a deadline to any SQE by setting
-`IOSQE_IO_LINK` on the op SQE and submitting a timeout SQE immediately after.
-If the op doesn't complete in time, io_uring cancels it and completes both with
-`-ECANCELED` / `-ETIME`. This would give `async_recv`, `async_accept`, etc. a
-natural `deadline` or `timeout` overload without a separate cancel path:
-
-```cpp
-fiberexec::async_recv(fd, buf, len, std::chrono::seconds{5});
-```
-
-Needs care around SQE ordering — the timeout SQE must be submitted atomically
-with the op SQE.
+`IORING_OP_LINK_TIMEOUT` attaches a deadline to any SQE via `IOSQE_IO_LINK`.
+All async ops now accept `std::optional<std::chrono::nanoseconds> timeout = std::nullopt`.
+`submit_and_wait_with_timeout` in `src/fiber_context.cpp` sets `IOSQE_IO_LINK`
+on the op SQE, submits a linked timeout SQE tagged with `k_cancel_tag`, and
+submits both atomically. Timeout fires → op gets `-ECANCELED` (throws
+`std::system_error(ECANCELED)`). Buffers were also migrated to
+`std::span<std::byte>` / `std::span<std::byte const>` in the same commit.
 
 ### Multi-shot accept (`IORING_ACCEPT_MULTISHOT`)
 

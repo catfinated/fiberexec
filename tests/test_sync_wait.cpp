@@ -4,6 +4,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 
@@ -109,14 +111,15 @@ TEST_CASE("sync_wait works with async I/O fan-out", "[sync_wait]") {
         // Reader fiber: fan out two reads using sync_wait
         stdexec::schedule(sched) | stdexec::then([&] {
             fiberexec::sync_wait(stdexec::when_all(
-                stdexec::schedule(sched) | stdexec::then([&] { fiberexec::async_recv(r1, buf1.data(), buf1.size()); }),
                 stdexec::schedule(sched) |
-                    stdexec::then([&] { fiberexec::async_recv(r2, buf2.data(), buf2.size()); })));
+                    stdexec::then([&] { fiberexec::async_recv(r1, std::as_writable_bytes(std::span{buf1})); }),
+                stdexec::schedule(sched) |
+                    stdexec::then([&] { fiberexec::async_recv(r2, std::as_writable_bytes(std::span{buf2})); })));
         }),
         // Writer fiber: send to both sockets
         stdexec::schedule(sched) | stdexec::then([&] {
-            fiberexec::async_send(w1, kA.data(), kA.size());
-            fiberexec::async_send(w2, kB.data(), kB.size());
+            fiberexec::async_send(w1, std::as_bytes(std::span<char const>{kA.data(), kA.size()}));
+            fiberexec::async_send(w2, std::as_bytes(std::span<char const>{kB.data(), kB.size()}));
         })));
 
     ::close(r1);

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <system_error>
@@ -74,8 +75,8 @@ void handle_connection(int fd) {
     std::array<char, 256> buf{};
     try {
         ssize_t n{};
-        while ((n = fiberexec::async_recv(fd, buf.data(), buf.size())) > 0) {
-            fiberexec::async_send(fd, buf.data(), static_cast<std::size_t>(n));
+        while ((n = fiberexec::async_recv(fd, std::as_writable_bytes(std::span{buf}))) > 0) {
+            fiberexec::async_send(fd, std::as_bytes(std::span{buf.data(), static_cast<std::size_t>(n)}));
         }
     } catch (std::system_error const&) {
     }
@@ -118,10 +119,10 @@ int main() {
             fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
 
             std::string const msg = "hello from client " + std::to_string(id);
-            fiberexec::async_send(fd, msg.data(), msg.size());
+            fiberexec::async_send(fd, std::as_bytes(std::span<char const>{msg.data(), msg.size()}));
 
             std::array<char, 256> buf{};
-            ssize_t n = fiberexec::async_recv(fd, buf.data(), buf.size());
+            ssize_t n = fiberexec::async_recv(fd, std::as_writable_bytes(std::span{buf}));
             std::printf("[client %d] echo: \"%.*s\"\n", id, static_cast<int>(n), buf.data());
             ::close(fd);
 
@@ -139,7 +140,8 @@ int main() {
                        [&] {
                            try {
                                while (true) {
-                                   int fd = fiberexec::async_accept(server_fd, nullptr, nullptr, ss.get_token());
+                                   int fd = fiberexec::async_accept(server_fd, nullptr, nullptr, std::nullopt,
+                                                                    ss.get_token());
                                    if (conn_ch.push(fd) != fiberexec::channel_op_status::success) {
                                        ::close(fd);
                                        break;

@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -59,7 +60,8 @@ int main() {
         auto reader = fiberexec::run(sched,
                                      [rfd, tok = ss.get_token()] {
                                          std::array<char, 64> buf{};
-                                         auto n = fiberexec::async_read(rfd, buf.data(), buf.size(), tok);
+                                         auto n = fiberexec::async_read(rfd, std::as_writable_bytes(std::span{buf}),
+                                                                        std::nullopt, tok);
                                          return std::string(buf.data(), static_cast<std::size_t>(n));
                                      }) |
                       stdexec::upon_stopped([] { return std::string{"(timed out)"}; });
@@ -95,7 +97,8 @@ int main() {
         auto reader = fiberexec::run(sched,
                                      [rfd, tok = ss.get_token()] {
                                          std::array<char, 64> buf{};
-                                         auto n = fiberexec::async_read(rfd, buf.data(), buf.size(), tok);
+                                         auto n = fiberexec::async_read(rfd, std::as_writable_bytes(std::span{buf}),
+                                                                        std::nullopt, tok);
                                          return std::string(buf.data(), static_cast<std::size_t>(n));
                                      }) |
                       stdexec::upon_stopped([] { return std::string{"(timed out)"}; });

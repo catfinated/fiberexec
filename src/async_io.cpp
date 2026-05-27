@@ -5,6 +5,8 @@
 
 #include <cerrno>
 #include <chrono>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <stop_token>
 #include <system_error>
@@ -30,64 +32,87 @@ io_uring* begin_async_op(std::stop_token& st, char const* caller) {
     return ring;
 }
 
+// Dispatch to submit_and_wait or submit_and_wait_with_timeout depending on
+// whether a timeout was provided.
+int dispatch(io_uring_sqe* sqe, std::optional<std::chrono::nanoseconds> const& timeout, std::stop_token st) {
+    if (timeout) {
+        return detail::submit_and_wait_with_timeout(sqe, *timeout, std::move(st));
+    }
+    return detail::submit_and_wait(sqe, std::move(st));
+}
+
 } // namespace
 
-ssize_t async_read(int fd, void* buf, std::size_t len, std::stop_token st) {
+ssize_t
+async_read(int fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout, std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_read"));
-    io_uring_prep_read(sqe, fd, buf, static_cast<unsigned>(len), 0);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    io_uring_prep_read(sqe, fd, buf.data(), static_cast<unsigned>(buf.size()), 0);
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_read");
     }
     return static_cast<ssize_t>(res);
 }
 
-ssize_t async_write(int fd, void const* buf, std::size_t len, std::stop_token st) {
+ssize_t async_write(int fd,
+                    std::span<std::byte const> buf,
+                    std::optional<std::chrono::nanoseconds> timeout,
+                    std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_write"));
-    io_uring_prep_write(sqe, fd, buf, static_cast<unsigned>(len), 0);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    io_uring_prep_write(sqe, fd, buf.data(), static_cast<unsigned>(buf.size()), 0);
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_write");
     }
     return static_cast<ssize_t>(res);
 }
 
-int async_accept(int fd, sockaddr* addr, socklen_t* addrlen, std::stop_token st) {
+int async_accept(
+    int fd, sockaddr* addr, socklen_t* addrlen, std::optional<std::chrono::nanoseconds> timeout, std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_accept"));
     io_uring_prep_accept(sqe, fd, addr, addrlen, 0);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_accept");
     }
     return res;
 }
 
-void async_connect(int fd, sockaddr const* addr, socklen_t addrlen, std::stop_token st) {
+void async_connect(int fd,
+                   sockaddr const* addr,
+                   socklen_t addrlen,
+                   std::optional<std::chrono::nanoseconds> timeout,
+                   std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_connect"));
     // io_uring_prep_connect takes a non-const addr; the kernel does not modify it.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
     io_uring_prep_connect(sqe, fd, const_cast<sockaddr*>(addr), addrlen);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_connect");
     }
 }
 
-ssize_t async_recv(int fd, void* buf, std::size_t len, int flags, std::stop_token st) {
+ssize_t async_recv(
+    int fd, std::span<std::byte> buf, int flags, std::optional<std::chrono::nanoseconds> timeout, std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_recv"));
-    io_uring_prep_recv(sqe, fd, buf, len, flags);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    io_uring_prep_recv(sqe, fd, buf.data(), buf.size(), flags);
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_recv");
     }
     return static_cast<ssize_t>(res);
 }
 
-ssize_t async_send(int fd, void const* buf, std::size_t len, int flags, std::stop_token st) {
+ssize_t async_send(int fd,
+                   std::span<std::byte const> buf,
+                   int flags,
+                   std::optional<std::chrono::nanoseconds> timeout,
+                   std::stop_token st) {
     io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op(st, "async_send"));
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    io_uring_prep_send(sqe, fd, const_cast<void*>(buf), len, flags);
-    int const res = detail::submit_and_wait(sqe, std::move(st));
+    io_uring_prep_send(sqe, fd, const_cast<void*>(static_cast<void const*>(buf.data())), buf.size(), flags);
+    int const res = dispatch(sqe, timeout, std::move(st));
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_send");
     }

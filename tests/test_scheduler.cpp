@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <optional>
+#include <span>
 #include <stop_token>
 #include <string_view>
 #include <system_error>
@@ -94,7 +96,8 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
     stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
                            try {
                                std::array<char, 4> buf{};
-                               fiberexec::async_read(read_fd, buf.data(), buf.size(), ss.get_token());
+                               fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}), std::nullopt,
+                                                     ss.get_token());
                            } catch (std::system_error const& e) {
                                threw = (e.code().value() == ECANCELED);
                            }
@@ -142,7 +145,8 @@ TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
     stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
                                              try {
                                                  std::array<char, 4> buf{};
-                                                 fiberexec::async_read(read_fd, buf.data(), buf.size(), ss.get_token());
+                                                 fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}),
+                                                                       std::nullopt, ss.get_token());
                                              } catch (std::system_error const& e) {
                                                  cancelled = (e.code().value() == ECANCELED);
                                              }
@@ -177,7 +181,7 @@ TEST_CASE("async_read cancelled automatically via sender stop token", "[cancella
             stdexec::schedule(sched) | stdexec::then([&] {
                 try {
                     std::array<char, 4> buf{};
-                    fiberexec::async_read(read_fd, buf.data(), buf.size());
+                    fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}));
                 } catch (std::system_error const& e) {
                     auto_cancelled = (e.code().value() == ECANCELED);
                 }
@@ -212,8 +216,11 @@ TEST_CASE("async_read and async_write suspend and resume fibers via io_uring", "
     // Dispatch writer and reader concurrently. The reader suspends until the
     // writer's data reaches the pipe buffer, exercising the CQE routing path.
     stdexec::sync_wait(stdexec::when_all(
-        stdexec::schedule(sched) | stdexec::then([&] { fiberexec::async_write(write_fd, kMsg.data(), kMsg.size()); }),
-        stdexec::schedule(sched) | stdexec::then([&] { fiberexec::async_read(read_fd, buf.data(), buf.size()); })));
+        stdexec::schedule(sched) | stdexec::then([&] {
+            fiberexec::async_write(write_fd, std::as_bytes(std::span<char const>{kMsg.data(), kMsg.size()}));
+        }),
+        stdexec::schedule(sched) |
+            stdexec::then([&] { fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf})); })));
 
     ::close(read_fd);
     ::close(write_fd);

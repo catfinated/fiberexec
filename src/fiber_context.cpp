@@ -284,6 +284,40 @@ int submit_and_wait(io_uring_sqe* sqe, std::stop_token st) {
     return future.get(); // suspends this fiber until the CQE arrives
 }
 
+int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout, std::stop_token st) {
+    // Chain a linked timeout: the kernel cancels sqe if it doesn't complete
+    // within timeout, returning -ECANCELED for the op and -ETIME for the
+    // timeout SQE (which drain_cqes discards via k_cancel_tag).
+    sqe->flags |= IOSQE_IO_LINK;
+
+    io_awaitable awaitable;
+    auto future = awaitable.promise.get_future();
+    io_uring_sqe_set_data(sqe, std::addressof(awaitable));
+
+    io_uring_sqe* tsqe = io_uring_get_sqe(tl_ring);
+    if (tsqe == nullptr) {
+        throw std::runtime_error("submit_and_wait_with_timeout: io_uring ring full");
+    }
+    // ts lives on the fiber's stack; valid for the duration of the wait
+    // because Boost.Fiber preserves the stack while the fiber is suspended.
+    __kernel_timespec ts{};
+    ts.tv_sec = timeout.count() / 1'000'000'000LL;
+    ts.tv_nsec = timeout.count() % 1'000'000'000LL;
+    io_uring_prep_link_timeout(tsqe, &ts, 0);
+    io_uring_sqe_set_data64(tsqe, k_cancel_tag);
+
+    if (int ret = io_uring_submit(tl_ring); ret < 0) {
+        throw std::system_error(-ret, std::system_category(), "io_uring_submit");
+    }
+    if (st.stop_possible()) {
+        auto* sched = tl_scheduler;
+        std::stop_callback cb{std::move(st),
+                              [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); }};
+        return future.get();
+    }
+    return future.get();
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------

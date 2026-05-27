@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
+#include <span>
 
 // Fan-out and gather from inside a fiber using fiberexec::sync_wait.
 //
@@ -56,25 +57,25 @@ int main() {
         fiberexec::run(sched,
                        [&] {
                            fiberexec::async_sleep_for(kDelays.at(0));
-                           fiberexec::async_write(pairs.at(0).at(1), &kValues.at(0), sizeof(int));
+                           fiberexec::async_write(pairs.at(0).at(1), std::as_bytes(std::span{&kValues.at(0), 1}));
                            std::cout << "[+" << ms() << "ms] wrote " << kValues.at(0) << '\n' << std::flush;
                        }),
         fiberexec::run(sched,
                        [&] {
                            fiberexec::async_sleep_for(kDelays.at(1));
-                           fiberexec::async_write(pairs.at(1).at(1), &kValues.at(1), sizeof(int));
+                           fiberexec::async_write(pairs.at(1).at(1), std::as_bytes(std::span{&kValues.at(1), 1}));
                            std::cout << "[+" << ms() << "ms] wrote " << kValues.at(1) << '\n' << std::flush;
                        }),
         fiberexec::run(sched,
                        [&] {
                            fiberexec::async_sleep_for(kDelays.at(2));
-                           fiberexec::async_write(pairs.at(2).at(1), &kValues.at(2), sizeof(int));
+                           fiberexec::async_write(pairs.at(2).at(1), std::as_bytes(std::span{&kValues.at(2), 1}));
                            std::cout << "[+" << ms() << "ms] wrote " << kValues.at(2) << '\n' << std::flush;
                        }),
         fiberexec::run(sched,
                        [&] {
                            fiberexec::async_sleep_for(kDelays.at(3));
-                           fiberexec::async_write(pairs.at(3).at(1), &kValues.at(3), sizeof(int));
+                           fiberexec::async_write(pairs.at(3).at(1), std::as_bytes(std::span{&kValues.at(3), 1}));
                            std::cout << "[+" << ms() << "ms] wrote " << kValues.at(3) << '\n' << std::flush;
                        }),
         // Collector fiber: sequential setup, then fan-out via fiberexec::sync_wait.
@@ -83,30 +84,30 @@ int main() {
 
             // All four reads are submitted simultaneously. This fiber suspends;
             // the OS thread is free to run the producer fibers while we wait.
-            auto [a, b, c, d] = *fiberexec::sync_wait(
-                stdexec::when_all(fiberexec::run(sched,
-                                                 [&] {
-                                                     int v{};
-                                                     fiberexec::async_read(pairs.at(0).at(0), &v, sizeof(v));
-                                                     return v;
-                                                 }),
-                                  fiberexec::run(sched,
-                                                 [&] {
-                                                     int v{};
-                                                     fiberexec::async_read(pairs.at(1).at(0), &v, sizeof(v));
-                                                     return v;
-                                                 }),
-                                  fiberexec::run(sched,
-                                                 [&] {
-                                                     int v{};
-                                                     fiberexec::async_read(pairs.at(2).at(0), &v, sizeof(v));
-                                                     return v;
-                                                 }),
-                                  fiberexec::run(sched, [&] {
-                                      int v{};
-                                      fiberexec::async_read(pairs.at(3).at(0), &v, sizeof(v));
-                                      return v;
-                                  })));
+            auto [a, b, c, d] = *fiberexec::sync_wait(stdexec::when_all(
+                fiberexec::run(sched,
+                               [&] {
+                                   int v{};
+                                   fiberexec::async_read(pairs.at(0).at(0), std::as_writable_bytes(std::span{&v, 1}));
+                                   return v;
+                               }),
+                fiberexec::run(sched,
+                               [&] {
+                                   int v{};
+                                   fiberexec::async_read(pairs.at(1).at(0), std::as_writable_bytes(std::span{&v, 1}));
+                                   return v;
+                               }),
+                fiberexec::run(sched,
+                               [&] {
+                                   int v{};
+                                   fiberexec::async_read(pairs.at(2).at(0), std::as_writable_bytes(std::span{&v, 1}));
+                                   return v;
+                               }),
+                fiberexec::run(sched, [&] {
+                    int v{};
+                    fiberexec::async_read(pairs.at(3).at(0), std::as_writable_bytes(std::span{&v, 1}));
+                    return v;
+                })));
 
             std::cout << "[+" << ms() << "ms] collected: " << a << ' ' << b << ' ' << c << ' ' << d << '\n';
             std::cout << "sum = " << (a + b + c + d) << "  (expected "

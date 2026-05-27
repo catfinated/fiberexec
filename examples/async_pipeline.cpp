@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <span>
 #include <string_view>
 
 // Two fibers share a pipe. The writer sends three messages, pausing between
@@ -36,7 +37,7 @@ int main() {
 
     auto writer = stdexec::schedule(sched) | stdexec::then([write_fd] {
                       for (auto msg : k_messages) {
-                          fiberexec::async_write(write_fd, msg.data(), msg.size());
+                          fiberexec::async_write(write_fd, std::as_bytes(std::span{msg.data(), msg.size()}));
                           fiberexec::async_sleep_for(100ms);
                       }
                       ::close(write_fd);
@@ -45,7 +46,7 @@ int main() {
     auto reader = stdexec::schedule(sched) | stdexec::then([read_fd] {
                       std::array<char, 256> buf{};
                       while (true) {
-                          auto const n = fiberexec::async_read(read_fd, buf.data(), buf.size());
+                          auto const n = fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}));
                           if (n == 0) {
                               break; // EOF — writer closed its end
                           }

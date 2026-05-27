@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdio>
+#include <span>
 #include <string>
 
 // A self-contained concurrent TCP echo server.
@@ -65,16 +66,17 @@ int main() {
 
     // Server fiber: accept kClients connections one at a time, echo each message.
     // async_accept suspends this fiber while waiting — the thread stays free.
-    auto server = stdexec::schedule(sched) | stdexec::then([&] {
-                      for (int i = 0; i < kClients; ++i) {
-                          int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
-                          std::array<char, 128> buf{};
-                          ssize_t n = fiberexec::async_recv(conn_fd, buf.data(), buf.size());
-                          fiberexec::async_send(conn_fd, buf.data(), static_cast<std::size_t>(n));
-                          std::printf("[server] echoed: \"%.*s\"\n", static_cast<int>(n), buf.data());
-                          ::close(conn_fd);
-                      }
-                  });
+    auto server =
+        stdexec::schedule(sched) | stdexec::then([&] {
+            for (int i = 0; i < kClients; ++i) {
+                int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                std::array<char, 128> buf{};
+                ssize_t n = fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{buf}));
+                fiberexec::async_send(conn_fd, std::as_bytes(std::span{buf.data(), static_cast<std::size_t>(n)}));
+                std::printf("[server] echoed: \"%.*s\"\n", static_cast<int>(n), buf.data());
+                ::close(conn_fd);
+            }
+        });
 
     // Client factory: connect, send a greeting, receive and print the echo.
     auto make_client = [&](int id) {
@@ -83,10 +85,10 @@ int main() {
                    fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
 
                    std::string const msg = "hello from client " + std::to_string(id);
-                   fiberexec::async_send(fd, msg.data(), msg.size());
+                   fiberexec::async_send(fd, std::as_bytes(std::span<char const>{msg.data(), msg.size()}));
 
                    std::array<char, 128> buf{};
-                   ssize_t n = fiberexec::async_recv(fd, buf.data(), buf.size());
+                   ssize_t n = fiberexec::async_recv(fd, std::as_writable_bytes(std::span{buf}));
                    std::printf("[client %d] echo: \"%.*s\"\n", id, static_cast<int>(n), buf.data());
                    ::close(fd);
                });

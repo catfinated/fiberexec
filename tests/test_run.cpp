@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -75,21 +76,21 @@ TEST_CASE("run maps async_read cancellation to set_stopped", "[run][cancellation
     bool auto_cancelled = false;
 
     try {
-        stdexec::sync_wait(stdexec::when_all(fiberexec::run(sched,
-                                                            [&] {
-                                                                try {
-                                                                    std::array<char, 4> buf{};
-                                                                    fiberexec::async_read(read_fd, buf.data(),
-                                                                                          buf.size());
-                                                                } catch (std::system_error const& e) {
-                                                                    auto_cancelled = (e.code().value() == ECANCELED);
-                                                                    throw; // let run map ECANCELED to set_stopped
-                                                                }
-                                                            }),
-                                             stdexec::schedule(sched) | stdexec::then([&] {
-                                                 fiberexec::async_sleep_for(10ms);
-                                                 throw std::runtime_error("trigger");
-                                             })));
+        stdexec::sync_wait(stdexec::when_all(
+            fiberexec::run(sched,
+                           [&] {
+                               try {
+                                   std::array<char, 4> buf{};
+                                   fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}));
+                               } catch (std::system_error const& e) {
+                                   auto_cancelled = (e.code().value() == ECANCELED);
+                                   throw; // let run map ECANCELED to set_stopped
+                               }
+                           }),
+            stdexec::schedule(sched) | stdexec::then([&] {
+                fiberexec::async_sleep_for(10ms);
+                throw std::runtime_error("trigger");
+            })));
     } catch (...) {
         // trigger's error propagates from when_all via sync_wait; expected
     }
@@ -164,7 +165,8 @@ TEST_CASE("pipe run maps async_read cancellation to set_stopped", "[run][pipe][c
         stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | fiberexec::run([&] {
                                                  try {
                                                      std::array<char, 4> buf{};
-                                                     fiberexec::async_read(read_fd, buf.data(), buf.size());
+                                                     fiberexec::async_read(read_fd,
+                                                                           std::as_writable_bytes(std::span{buf}));
                                                  } catch (std::system_error const& e) {
                                                      auto_cancelled = (e.code().value() == ECANCELED);
                                                      throw;

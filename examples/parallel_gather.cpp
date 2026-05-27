@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <span>
 #include <vector>
 
 // Parallel gather via stdexec::bulk on a fiberexec scheduler.
@@ -55,7 +56,7 @@ int main() {
     // Fan out N fiber recvs via bulk, then gather into results[].
     stdexec::sync_wait(
         stdexec::bulk(stdexec::schedule(sched), stdexec::par, static_cast<std::size_t>(N), [&](std::size_t i) {
-            fiberexec::async_recv(pairs.at(i).at(1), &results.at(i), sizeof(results.at(i)), MSG_WAITALL);
+            fiberexec::async_recv(pairs.at(i).at(1), std::as_writable_bytes(std::span{&results.at(i), 1}), MSG_WAITALL);
         }));
 
     for (auto& t : producers) {

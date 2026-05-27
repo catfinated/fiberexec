@@ -76,7 +76,7 @@ The C++26 standard includes the core execution model but not networking or async
 
 Fibers make this particularly interesting because they let you write I/O code that looks synchronous (blocking calls in a straight line) while actually being async under the hood (the fiber yields, another fiber runs, the original resumes when I/O completes). Putting a sender/receiver frontend on a fiber-based I/O runtime could give you the composability and structure of `std::execution` with the ergonomics of blocking code.
 
-Each OS thread in the fiberexec pool owns its own `io_uring` instance. When a fiber wants to do I/O, it submits a request to the thread-local ring and yields; the scheduler reaps completions and resumes the fiber with the result. From the fiber's perspective, the call looks blocking — `auto bytes = fiberexec::async_read(fd, buf, len);` — but no OS thread is ever actually blocked. This is similar in spirit to what [Seastar](https://seastar.io/) and [glommio](https://github.com/DataDog/glommio) do, but with `std::execution` as the composition layer on top.
+Each OS thread in the fiberexec pool owns its own `io_uring` instance. When a fiber wants to do I/O, it submits a request to the thread-local ring and yields; the scheduler reaps completions and resumes the fiber with the result. From the fiber's perspective, the call looks blocking — `auto bytes = fiberexec::async_read(fd, buf);` — but no OS thread is ever actually blocked. This is similar in spirit to what [Seastar](https://seastar.io/) and [glommio](https://github.com/DataDog/glommio) do, but with `std::execution` as the composition layer on top.
 
 Whether this combination is actually better than a sender-only model is the research question this project exists to explore.
 
@@ -104,8 +104,8 @@ The most familiar pattern for stdexec users, but cancelled I/O surfaces as
 
 ```cpp
 auto work = stdexec::schedule(sched) | stdexec::then([&] {
-    auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
-    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
+    auto n = fiberexec::async_read(client_fd, buf);
+    fiberexec::async_write(client_fd, buf.first(static_cast<std::size_t>(n)));
 });
 ```
 
@@ -117,8 +117,8 @@ the stdexec cancellation signal loop):
 
 ```cpp
 auto work = fiberexec::run(sched, [&] {
-    auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
-    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
+    auto n = fiberexec::async_read(client_fd, buf);
+    fiberexec::async_write(client_fd, buf.first(static_cast<std::size_t>(n)));
 });
 ```
 
@@ -128,8 +128,8 @@ Identical semantics to `run(sched, fn)` with the familiar stdexec pipe syntax:
 
 ```cpp
 auto work = stdexec::schedule(sched) | fiberexec::run([&] {
-    auto n = fiberexec::async_read(client_fd, buf, sizeof(buf));
-    fiberexec::async_write(client_fd, buf, static_cast<std::size_t>(n));
+    auto n = fiberexec::async_read(client_fd, buf);
+    fiberexec::async_write(client_fd, buf.first(static_cast<std::size_t>(n)));
 });
 ```
 
@@ -139,7 +139,7 @@ Because `run` sends `set_stopped` on cancellation, it composes directly with
 ```cpp
 auto result = fiberexec::run(sched, [rfd, tok = ss.get_token()] {
     std::array<char, 64> buf{};
-    auto n = fiberexec::async_read(rfd, buf.data(), buf.size(), tok);
+    auto n = fiberexec::async_read(rfd, std::as_writable_bytes(std::span{buf}), std::nullopt, tok);
     return std::string(buf.data(), static_cast<std::size_t>(n));
 }) | stdexec::upon_stopped([] { return std::string{"(timed out)"}; });
 ```
@@ -153,7 +153,7 @@ The two models complement each other. When you need structured concurrency, you 
 ```cpp
 auto work = fiberexec::run(sched, [&] {
     // Sequential setup — just normal code
-    auto n = fiberexec::async_read(config_fd, buf, sizeof(buf));
+    auto n = fiberexec::async_read(config_fd, buf);
     auto endpoints = parse_endpoints(std::string_view{buf, static_cast<std::size_t>(n)});
 
     // Fan-out — use senders for concurrency; sync_wait suspends this
@@ -188,7 +188,7 @@ stdexec::sync_wait(
         [&](std::size_t i) {
             // Each index runs as an independent fiber.
             // async_recv suspends this fiber; pool threads remain free.
-            fiberexec::async_recv(fds[i], &results[i], sizeof(results[i]), MSG_WAITALL);
+            fiberexec::async_recv(fds[i], std::as_writable_bytes(std::span{&results[i], 1}), MSG_WAITALL);
         })
 );
 // All N recvs have completed here.

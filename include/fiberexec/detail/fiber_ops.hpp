@@ -2,6 +2,7 @@
 
 #include <fiberexec/task.hpp>
 
+#include <chrono>
 #include <stop_token>
 
 // Forward-declare liburing types so includers don't need to pull in <liburing.h>.
@@ -33,6 +34,13 @@ void schedule_task(fiber_pool& pool, task work) noexcept;
 /// an IORING_OP_ASYNC_CANCEL is submitted and the return value will be
 /// -ECANCELED once the kernel confirms the cancellation.
 int submit_and_wait(io_uring_sqe* sqe, std::stop_token st = {});
+
+/// Like submit_and_wait, but attaches a linked timeout to @p sqe via
+/// IORING_OP_LINK_TIMEOUT.  If @p timeout elapses before the op completes,
+/// the kernel cancels the op and returns -ECANCELED (same as explicit
+/// cancellation via a stop token).  Both SQEs are submitted in a single
+/// io_uring_submit call.
+int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout, std::stop_token st = {});
 
 /// Install @p tok as the stop token for the currently running fiber.
 /// Called by operation::start() before invoking set_value on the receiver.
