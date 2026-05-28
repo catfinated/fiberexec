@@ -46,12 +46,14 @@ tail latency (p999) is tighter than thread-per-connection at every concurrency
 level and does not degrade with connection count, while thread tails worsen
 steadily. See `FINDINGS.md` for full tables and analysis.
 
-### Non-loopback workload
+### ~~Non-loopback workload~~ ✅ done
 
-Loopback I/O completes near-instantaneously, which understates the fiber
-advantage — fiber suspension only pays off when I/O actually blocks. At minimum
-one workload should introduce measurable I/O latency (e.g. `tc netem` delay on
-loopback, a Unix-domain socket between containers, or cross-host).
+Implemented as `benchmarks/bench_delay.cpp`. A 1 ms server-side
+`async_sleep_for` between recv and send simulates a slow upstream call without
+requiring `tc netem` or cross-host setup. At 1000 connections fiberexec
+sustains 268× the single-connection throughput; Asio collapses 15× from its
+100-connection performance (likely timer-queue contention — flagged as an open
+investigation in FINDINGS.md). See FINDINGS.md for full results and analysis.
 
 ### Head-to-head against pika on an I/O workload
 

@@ -279,15 +279,108 @@ thread-per-connection at every level.
 
 ---
 
+## Blocking I/O delay (`bench_delay`)
+
+The echo-server and latency benchmarks use loopback TCP, where I/O completes
+near-instantaneously — the fiber's ability to overlap blocked connections is
+not exercised. `bench_delay` addresses this directly: each connection's server
+handler sleeps for 1 ms between recv and send, simulating a slow upstream call
+or database query. This is the workload where fiber suspension has the most to
+offer: a fiber blocked on the 1 ms sleep yields its OS thread, which picks up
+another fiber, rather than stalling.
+
+Metric: total round-trips/second across all connections (10 round-trips per
+connection, 64-byte payload).
+
+| Benchmark | 1 conn | 10 conns | 100 conns | 1000 conns |
+|-----------|--------|----------|-----------|------------|
+| fiberexec (16 threads) | 963/s | 9,408/s | 82,105/s | **258,130/s** |
+| Thread-per-connection | 923/s | 9,043/s | 77,997/s | — (capped) |
+| Asio coroutines (`asio::steady_timer`) | 962/s | 9,477/s | 82,810/s | **5,361/s** |
+| Raw io_uring (1 thread, `IORING_OP_TIMEOUT`) | 965/s | 9,163/s | 60,179/s | 98,687/s |
+
+### 1–10 connections — all approaches equivalent
+
+All four are bounded by `10 round-trips × 1 ms = 10 ms` minimum. No
+meaningful difference. This confirms the loopback benchmarks are not misleading
+at low concurrency — it is specifically high concurrency with real blocking
+where the models diverge.
+
+### 100 connections — io_uring single-thread limit appears
+
+Fiber (82k), thread (78k), and Asio (83k) all cluster at ~80–83× the
+single-connection baseline — near-perfect overlap across all 100 connections.
+Threads pay a small scheduling premium but remain competitive.
+
+The single-threaded io_uring event loop lags at 60k (62×). When 100 timers
+fire simultaneously, the single event-loop thread serially drains the burst of
+100 CQEs and submits 100 sends before any connection can start its next
+round-trip. This serialization accumulates over 10 round-trips per connection.
+
+### 1000 connections — the central result
+
+**fiberexec: 258k/s — 268× the single-connection baseline.** Near-linear
+scaling from 1 to 1000. Each of the 1000 fibers suspends on `async_sleep_for`
+during its 1 ms delay, freeing the thread to run another fiber. With 16
+threads and 1000 simultaneously suspended fibers, throughput keeps climbing as
+if all connections run in parallel — because at the fiber level, they do.
+
+**Thread-per-connection: not tested at 1000.** 1000 sleeping OS threads
+requires gigabytes of stack and heavy kernel scheduler pressure; the design
+breaks down before you can benchmark it. The benchmark is intentionally capped
+at 100.
+
+**Asio: 5,361/s — a 15× collapse from 100 connections.** Real time per
+iteration jumped from 12 ms (100 conns) to 1,865 ms (1000 conns) while CPU
+time stayed at ~32 ms, meaning threads spent almost all of those 1.865 seconds
+blocked rather than running. The most likely cause is contention on the
+`asio::thread_pool`'s internal work queue: when 1000 coroutines' timers expire
+simultaneously, 1000 callbacks are enqueued at once and 16 threads serialize
+access to the shared queue under a lock. fiberexec avoids this because each
+worker thread owns its io_uring ring and Boost.Fiber scheduler — there is no
+shared completion queue.
+
+**Caveat on the Asio result**: I am not an Asio expert, and it is plausible
+that a different setup would perform better — for example, per-thread
+`asio::io_context` instances rather than a single `asio::thread_pool`, or a
+different timer strategy. The collapse is reproducible in this benchmark, but
+the root cause has not been fully diagnosed. This is flagged as an open
+investigation in the section below.
+
+**Raw io_uring (single thread): 98.7k/s — functional but 2.6× behind
+fiberexec.** The single event-loop thread processes CQEs serially; at 1000
+connections the burst of simultaneous timer completions takes real time to
+drain. Notably, single-threaded io_uring still beats Asio at 1000 connections
+despite being single-threaded, because it has no shared-queue contention.
+
+### Summary
+
+The fiber model's advantage at scale is structural: fibers yield during
+blocking I/O, threads do not, and fiberexec's per-thread io_uring rings avoid
+shared-state contention at completion time. At 1000 connections with a 1 ms
+processing delay, fiberexec sustains 268× the single-connection throughput.
+The thread model cannot reach 1000 connections. The Asio result at 1000
+connections collapsed in this benchmark and warrants further investigation
+before drawing firm conclusions about coroutine-based frameworks in general.
+
+---
+
 ## Open questions
 
-The measurements above cover loopback only. The tail-latency advantage of
-fiberexec over threads is visible even here, but loopback I/O completes
-near-instantaneously — the fiber's ability to keep threads productive while
-waiting is not exercised. **The remaining missing measurement is p50/p99/p999
-on a workload with real I/O latency** (e.g. `tc netem` delay on loopback),
-where OS threads blocked on `recv` would otherwise stall their core and the
-fiber scheduler's multiplexing would provide measurable benefit.
+**Latency distribution under blocking I/O.** `bench_delay` measures throughput
+with a 1 ms delay. The p50/p99/p999 latency profile under that same workload
+— where fibers are suspended and OS threads are available for other work —
+has not yet been measured. This is the natural next step.
+
+**Asio `asio::steady_timer` at high concurrency.** The 15× throughput collapse
+at 1000 connections is the most surprising result in this benchmark. Before
+treating it as a statement about Asio coroutines in general, it is worth
+investigating alternatives: per-thread `asio::io_context`, explicit timer
+batching, or a different concurrency model within Asio. I do not have enough
+Asio expertise to rule out a benchmark setup issue. If the collapse survives
+those alternatives, it is a meaningful finding about `asio::thread_pool`'s
+shared work queue at scale; if it does not, the comparison at 1000 connections
+should be revised.
 
 ---
 
@@ -323,6 +416,17 @@ Command (for sections that replicated):
 
 ```
 ./build/benchmark/benchmarks/bench_echo --benchmark_repetitions=5
+```
+
+### bench_delay — new, not yet replicated
+
+Results above are from a single run (`--benchmark_min_time=2s`). The Asio
+collapse at 1000 connections was consistent between a short smoke run
+(`--benchmark_min_time=0.1s`, 4 iterations) and the full run (74 iterations),
+confirming it is not a statistical artifact.
+
+```
+./build/benchmark/benchmarks/bench_delay --benchmark_min_time=2s
 ```
 
 ### bench_latency — partially replicated
