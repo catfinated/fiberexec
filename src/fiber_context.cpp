@@ -39,6 +39,80 @@ constexpr uint64_t k_work_tag = 0;
 constexpr uint64_t k_notify_tag = 1;
 constexpr uint64_t k_cancel_tag = 2;
 
+} // namespace
+
+// ---------------------------------------------------------------------------
+// fiber_pool — owns the OS threads, per-thread schedulers, and shared queues.
+// Defined here (in fiberexec namespace, matching the header forward declaration)
+// so io_uring_scheduler can hold a fiber_pool* and access its members directly.
+// worker() is defined after io_uring_scheduler because it instantiates it as
+// a template argument.
+// ---------------------------------------------------------------------------
+class fiber_pool {
+public:
+    explicit fiber_pool(std::uint32_t thread_count, std::size_t stack_size)
+        : running_{true}
+        , stack_size_{stack_size}
+        , eventfd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
+        if (eventfd_ < 0) {
+            throw std::system_error(errno, std::system_category(), "eventfd");
+        }
+        threads_.reserve(thread_count);
+        for (std::uint32_t i = 0; i < thread_count; ++i) {
+            threads_.emplace_back([this] { worker(); });
+        }
+    }
+
+    ~fiber_pool() {
+        stop();
+        for (auto& thr : threads_) {
+            if (thr.joinable()) {
+                thr.join();
+            }
+        }
+        ::close(eventfd_);
+    }
+
+    fiber_pool(fiber_pool const&) = delete;
+    fiber_pool& operator=(fiber_pool const&) = delete;
+    fiber_pool(fiber_pool&&) = delete;
+    fiber_pool& operator=(fiber_pool&&) = delete;
+
+    void post(task work) {
+        {
+            std::scoped_lock lock{mtx_};
+            work_queue_.push(std::move(work));
+        }
+        uint64_t const val = 1;
+        ::write(eventfd_, &val, sizeof(val));
+    }
+
+private:
+    friend class io_uring_scheduler;
+
+    void worker(); // defined after io_uring_scheduler is complete
+
+    void stop() {
+        pool_stop_source_.request_stop();
+        std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
+        running_.store(false, std::memory_order_release);
+        // notify_all wakes every parked main fiber via each scheduler's notify(),
+        // which writes to that thread's per-thread eventfd to interrupt io_uring.
+        shutdown_cv_.notify_all();
+    }
+
+    boost::fibers::condition_variable shutdown_cv_;
+    boost::fibers::mutex shutdown_mtx_;
+    std::atomic<bool> running_;
+    std::size_t stack_size_;
+    int eventfd_;
+    std::atomic<std::size_t> in_flight_{0};
+    std::stop_source pool_stop_source_;
+    std::vector<std::thread> threads_;
+    std::mutex mtx_;
+    std::queue<task> work_queue_;
+};
+
 // ---------------------------------------------------------------------------
 // io_uring_scheduler
 //
@@ -51,24 +125,12 @@ constexpr uint64_t k_cancel_tag = 2;
 // awakened() / notify() may be called from any OS thread; the ready queue is
 // protected by a mutex accordingly.
 // ---------------------------------------------------------------------------
+namespace {
+
 class io_uring_scheduler : public boost::fibers::algo::algorithm {
 public:
-    io_uring_scheduler(std::atomic<bool>* running,
-                       int work_efd,
-                       std::mutex* mtx,
-                       std::queue<task>* work_queue,
-                       std::size_t stack_size,
-                       std::atomic<std::size_t>* in_flight,
-                       boost::fibers::condition_variable* shutdown_cv,
-                       std::stop_token pool_stop_token)
-        : running_{running}
-        , work_efd_{work_efd}
-        , mtx_{mtx}
-        , work_queue_{work_queue}
-        , stack_size_{stack_size}
-        , in_flight_{in_flight}
-        , shutdown_cv_{shutdown_cv}
-        , pool_stop_token_{std::move(pool_stop_token)}
+    explicit io_uring_scheduler(fiber_pool* pool)
+        : pool_{pool}
         , notify_fd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
         if (notify_fd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd (notify)");
@@ -161,14 +223,14 @@ public:
         ::write(notify_fd_, &val, sizeof(val));
     }
 
-    std::stop_token pool_stop_token() const noexcept { return pool_stop_token_; }
+    std::stop_token pool_stop_token() const noexcept { return pool_->pool_stop_source_.get_token(); }
 
 private:
     static constexpr unsigned k_ring_entries = 256;
 
     void arm_work_efd() {
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-        io_uring_prep_read(sqe, work_efd_, &work_efd_val_, sizeof(work_efd_val_), 0);
+        io_uring_prep_read(sqe, pool_->eventfd_, &work_efd_val_, sizeof(work_efd_val_), 0);
         io_uring_sqe_set_data64(sqe, k_work_tag);
         io_uring_submit(&ring_);
     }
@@ -197,14 +259,14 @@ private:
     }
 
     void launch_fiber(task work) noexcept {
-        in_flight_->fetch_add(1, std::memory_order_relaxed);
-        auto tracked = [fn = std::move(work), in_flight = in_flight_, cv = shutdown_cv_]() mutable {
+        pool_->in_flight_.fetch_add(1, std::memory_order_relaxed);
+        auto tracked = [fn = std::move(work), pool = pool_]() mutable {
             fn();
-            if (in_flight->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                cv->notify_all();
+            if (pool->in_flight_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                pool->shutdown_cv_.notify_all();
             }
         };
-        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}, std::move(tracked))
+        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{pool_->stack_size_}, std::move(tracked))
             .detach();
     }
 
@@ -219,13 +281,13 @@ private:
             cqe = nullptr;
 
             if (tag == k_work_tag) {
-                if (res >= 0 && running_->load(std::memory_order_relaxed)) {
+                if (res >= 0 && pool_->running_.load(std::memory_order_relaxed)) {
                     task work;
                     {
-                        std::scoped_lock lk{*mtx_};
-                        if (!work_queue_->empty()) {
-                            work = std::move(work_queue_->front());
-                            work_queue_->pop();
+                        std::scoped_lock lk{pool_->mtx_};
+                        if (!pool_->work_queue_.empty()) {
+                            work = std::move(pool_->work_queue_.front());
+                            pool_->work_queue_.pop();
                         }
                     }
                     if (work) {
@@ -234,7 +296,7 @@ private:
                 }
                 // Guard re-arm: an unconditional re-arm after the stop token
                 // would consume a token meant for another thread's notify fd.
-                if (running_->load(std::memory_order_acquire)) {
+                if (pool_->running_.load(std::memory_order_acquire)) {
                     arm_work_efd();
                 }
             } else if (tag == k_notify_tag) {
@@ -251,14 +313,7 @@ private:
         }
     }
 
-    std::atomic<bool>* running_;   // non-owning — pool lifecycle flag
-    int work_efd_;                 // non-owning — shared work eventfd
-    std::mutex* mtx_;              // non-owning — shared work queue mutex
-    std::queue<task>* work_queue_; // non-owning — shared work queue
-    std::size_t stack_size_;
-    std::atomic<std::size_t>* in_flight_;            // non-owning — tracks live user fibers
-    boost::fibers::condition_variable* shutdown_cv_; // non-owning — pool drain signal
-    std::stop_token pool_stop_token_;
+    fiber_pool* pool_;
     int notify_fd_;
     io_uring ring_{};
     mutable std::mutex ready_mtx_;
@@ -344,97 +399,21 @@ int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds tim
     return future.get();
 }
 
-} // namespace detail
-
-// ---------------------------------------------------------------------------
-// fiber_pool — owns the OS threads, per-thread schedulers, and shared queues
-// ---------------------------------------------------------------------------
-
-class fiber_pool {
-public:
-    explicit fiber_pool(std::uint32_t thread_count, std::size_t stack_size)
-        : running_{true}
-        , stack_size_{stack_size}
-        , eventfd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
-        if (eventfd_ < 0) {
-            throw std::system_error(errno, std::system_category(), "eventfd");
-        }
-        threads_.reserve(thread_count);
-        for (std::uint32_t i = 0; i < thread_count; ++i) {
-            threads_.emplace_back([this] { worker(); });
-        }
-    }
-
-    ~fiber_pool() {
-        stop();
-        for (auto& thr : threads_) {
-            if (thr.joinable()) {
-                thr.join();
-            }
-        }
-        ::close(eventfd_);
-    }
-
-    fiber_pool(fiber_pool const&) = delete;
-    fiber_pool& operator=(fiber_pool const&) = delete;
-    fiber_pool(fiber_pool&&) = delete;
-    fiber_pool& operator=(fiber_pool&&) = delete;
-
-    void post(task work) {
-        {
-            std::scoped_lock lock{mtx_};
-            work_queue_.push(std::move(work));
-        }
-        uint64_t const val = 1;
-        ::write(eventfd_, &val, sizeof(val));
-    }
-
-private:
-    void worker() {
-        boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(&running_, eventfd_, &mtx_, &work_queue_,
-                                                                    stack_size_, &in_flight_, &shutdown_cv_,
-                                                                    pool_stop_source_.get_token());
-
-        // Park the main fiber here. The scheduler's suspend_until() drives all
-        // io_uring and fiber dispatch. stop() notifies the CV to unblock us.
-        // We also wait for all in-flight fibers to drain before exiting.
-        std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
-        shutdown_cv_.wait(lk, [this] {
-            return !running_.load(std::memory_order_relaxed) && in_flight_.load(std::memory_order_acquire) == 0;
-        });
-    }
-
-    void stop() {
-        // Cancel all pending I/O so suspended fibers unblock and complete.
-        pool_stop_source_.request_stop();
-        std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
-        running_.store(false, std::memory_order_release);
-        // notify_all wakes every parked main fiber via each scheduler's notify(),
-        // which writes to that thread's per-thread eventfd to interrupt io_uring.
-        shutdown_cv_.notify_all();
-    }
-
-    boost::fibers::condition_variable shutdown_cv_;
-    boost::fibers::mutex shutdown_mtx_;
-    std::atomic<bool> running_;
-    std::size_t stack_size_;
-    int eventfd_;
-    std::atomic<std::size_t> in_flight_{0};
-    std::stop_source pool_stop_source_;
-    std::vector<std::thread> threads_;
-    std::mutex mtx_;
-    std::queue<task> work_queue_;
-};
-
-// ---------------------------------------------------------------------------
-// schedule_task
-// ---------------------------------------------------------------------------
-
-namespace detail {
-
 void schedule_task(fiber_pool& pool, task work) noexcept { pool.post(std::move(work)); }
 
 } // namespace detail
+
+void fiber_pool::worker() {
+    boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(this);
+
+    // Park the main fiber here. The scheduler's suspend_until() drives all
+    // io_uring and fiber dispatch. stop() notifies the CV to unblock us.
+    // We also wait for all in-flight fibers to drain before exiting.
+    std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
+    shutdown_cv_.wait(lk, [this] {
+        return !running_.load(std::memory_order_relaxed) && in_flight_.load(std::memory_order_acquire) == 0;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // context
