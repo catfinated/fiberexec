@@ -188,9 +188,10 @@ Implemented as `examples/echo_server_pool.cpp`. The accept loop runs
 indefinitely, pushing accepted fds into a `channel<int>`; a fixed pool
 of worker fibers drains the channel. Channel capacity bounds the connection
 backlog and provides backpressure to the acceptor when all workers are busy.
-Shutdown is coordinated through a `std::stop_source`: the last test client
-calls `request_stop()`, cancelling `async_accept` (ECANCELED), which closes
-the channel and lets the worker pool drain and exit cleanly.
+Shutdown is coordinated server-side: the last test client calls
+`::shutdown(server_fd, SHUT_RDWR)`, which causes `async_accept` to throw;
+the accept loop catches the error, closes the channel, and the worker pool
+drains and exits cleanly.
 
 ### `async_read` / `async_write` vs `async_recv` / `async_send`
 
