@@ -10,10 +10,8 @@
 
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <cstdio>
 #include <span>
-#include <stop_token>
 #include <string>
 #include <system_error>
 
@@ -35,11 +33,11 @@
 //               (async_openat → recv loop → async_write → async_close)
 //
 // Shutdown sequence: after the last connection is fully written and closed,
-// the worker fires request_stop(), which cancels async_accept (ECANCELED),
-// the accept loop closes the channel, and the remaining workers exit cleanly.
-// Stop is triggered server-side (after all data is on disk) rather than
-// client-side, so the accept loop cannot exit before every client's data has
-// been received.
+// the worker calls ::shutdown(server_fd, SHUT_RDWR), which causes async_accept
+// to throw; the accept loop catches the error and closes the channel; remaining
+// workers drain, see the channel closed, and exit.  Stop is triggered
+// server-side (after all data is on disk) rather than client-side, so the
+// accept loop cannot exit before every client's data has been received.
 
 namespace {
 
@@ -74,9 +72,9 @@ std::atomic<int> g_next_id{0}; // NOLINT(cppcoreguidelines-avoid-non-const-globa
 // suspend the fiber without blocking the OS thread.  From the fiber's
 // perspective this is straight-line sequential code.
 //
-// Once all kClients connections have been fully processed, fires request_stop()
-// so the accept loop exits cleanly.
-void handle_connection(int client_fd, std::stop_source& ss) {
+// Once all kClients connections have been processed, shuts down the listening
+// socket so async_accept returns an error and the accept loop exits.
+void handle_connection(int client_fd, int server_fd) {
     int const id = g_next_id.fetch_add(1, std::memory_order_relaxed);
     std::string const path = "connection_" + std::to_string(id) + ".log";
 
@@ -98,10 +96,8 @@ void handle_connection(int client_fd, std::stop_source& ss) {
 
     std::printf("[connection %d] wrote %s\n", id, path.c_str());
 
-    // Stop is triggered server-side after all connections are processed so the
-    // accept loop doesn't exit before the server has seen every client's data.
     if (id == kClients - 1) {
-        ss.request_stop();
+        ::shutdown(server_fd, SHUT_RDWR); // unblock async_accept so the accept loop exits
     }
 }
 
@@ -116,12 +112,11 @@ int main() {
     auto sched = ctx.get_scheduler();
 
     fiberexec::channel<int> conn_ch{8};
-    std::stop_source ss;
 
     auto worker = [&] {
         int fd{};
         while (conn_ch.pop(fd) == fiberexec::channel_op_status::success) {
-            handle_connection(fd, ss);
+            handle_connection(fd, server_fd);
         }
     };
 
@@ -140,17 +135,13 @@ int main() {
                                          [&] {
                                              try {
                                                  while (true) {
-                                                     int fd = fiberexec::async_accept(server_fd, nullptr, nullptr,
-                                                                                      std::nullopt, ss.get_token());
+                                                     int fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
                                                      if (conn_ch.push(fd) != fiberexec::channel_op_status::success) {
                                                          ::close(fd);
                                                          break;
                                                      }
                                                  }
-                                             } catch (std::system_error const& e) {
-                                                 if (e.code().value() != ECANCELED) {
-                                                     throw;
-                                                 }
+                                             } catch (std::system_error const&) {
                                              }
                                              conn_ch.close();
                                          }),

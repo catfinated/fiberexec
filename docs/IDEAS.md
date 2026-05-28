@@ -151,16 +151,15 @@ threaded through `fiber_pool` and `io_uring_scheduler` and used via
 `std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}` at
 each fiber launch site.
 
-### Graceful shutdown drain
+### ~~Graceful shutdown drain~~ ✅ done
 
-The `echo_server_pool` shutdown sequence (stop token → `ECANCELED` → channel
-close → workers drain) is the correct pattern, but it is not enforced at the
-framework level. The `context` destructor should guarantee that all in-flight
-fibers are driven to a terminal completion (value, error, or stopped) before the
-pool tears down. Relying on Boost.Fiber's forced stack unwind as an implicit
-cancellation mechanism is a design smell and breaks the P2300 guarantee that
-every started operation completes exactly once. Closing this gap completes the
-structured-concurrency story.
+`fiber_pool` tracks live user fibers with an `in_flight_` atomic counter.
+`launch_fiber()` wraps each fiber to decrement the counter on completion and
+signal `shutdown_cv_`; `worker()` waits for both `running_ == false` and
+`in_flight_ == 0` before exiting. A pool-level `stop_source` is also wired
+into `submit_and_wait` so all pending I/O is cancelled before the drain
+completes. The pool now guarantees every started fiber reaches a terminal
+completion before the context destructs.
 
 ### Lazy stop-token installation
 

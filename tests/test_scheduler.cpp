@@ -10,12 +10,10 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <optional>
 #include <span>
-#include <stop_token>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
-#include <thread>
 
 TEST_CASE("scheduler satisfies stdexec::scheduler concept", "[scheduler]") {
     STATIC_REQUIRE(stdexec::scheduler<fiberexec::scheduler>);
@@ -81,10 +79,13 @@ TEST_CASE("async_sleep_for suspends the fiber for at least the requested duratio
     REQUIRE(elapsed >= 50ms);
 }
 
-TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellation]") {
-    std::stop_source ss;
-    ss.request_stop();
-
+TEST_CASE("async_read with pre-cancelled fiber stop token throws immediately", "[cancellation]") {
+    // Verify the pre-cancellation fast path in begin_async_op: if the fiber's
+    // stop token is already requested, async_read throws ECANCELED without
+    // submitting an SQE to io_uring.  We arrange for the stop to be requested
+    // BEFORE async_read is called by letting the trigger branch throw first (a
+    // 60 s sleep in the reader ensures the trigger always wins the race).
+    using namespace std::chrono_literals;
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool threw = false;
@@ -93,73 +94,30 @@ TEST_CASE("async_read with pre-cancelled token throws immediately", "[cancellati
     REQUIRE(::pipe(pipefd.data()) == 0);
     auto [read_fd, write_fd] = pipefd;
 
-    stdexec::sync_wait(stdexec::schedule(sched) | stdexec::then([&] {
-                           try {
-                               std::array<char, 4> buf{};
-                               fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}), std::nullopt,
-                                                     ss.get_token());
-                           } catch (std::system_error const& e) {
-                               threw = (e.code().value() == ECANCELED);
-                           }
-                       }));
+    try {
+        stdexec::sync_wait(
+            stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
+                                  // Long sleep ensures the trigger fires and cancels us first.
+                                  try {
+                                      fiberexec::async_sleep_for(60s);
+                                  } catch (...) {
+                                  }
+                                  // Stop is now requested; next async op must throw immediately.
+                                  try {
+                                      std::array<char, 4> buf{};
+                                      fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}));
+                                  } catch (std::system_error const& e) {
+                                      threw = (e.code().value() == ECANCELED);
+                                  }
+                              }),
+                              stdexec::schedule(sched) | stdexec::then([] { throw std::runtime_error("trigger"); })));
+    } catch (...) {
+    }
 
     ::close(read_fd);
     ::close(write_fd);
 
     REQUIRE(threw);
-}
-
-TEST_CASE("async_sleep_for cancelled by stop_source", "[cancellation]") {
-    using namespace std::chrono_literals;
-    fiberexec::context ctx{2};
-    auto sched = ctx.get_scheduler();
-    std::stop_source ss;
-    bool cancelled = false;
-
-    stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
-                                             try {
-                                                 fiberexec::async_sleep_for(60s, ss.get_token());
-                                             } catch (std::system_error const& e) {
-                                                 cancelled = (e.code().value() == ECANCELED);
-                                             }
-                                         }),
-                                         stdexec::schedule(sched) | stdexec::then([&] {
-                                             fiberexec::async_sleep_for(10ms);
-                                             ss.request_stop();
-                                         })));
-
-    REQUIRE(cancelled);
-}
-
-TEST_CASE("async_read cancelled by stop_source", "[cancellation]") {
-    using namespace std::chrono_literals;
-    std::array<int, 2> pipefd{};
-    REQUIRE(::pipe(pipefd.data()) == 0);
-    auto [read_fd, write_fd] = pipefd;
-
-    fiberexec::context ctx{2};
-    auto sched = ctx.get_scheduler();
-    std::stop_source ss;
-    bool cancelled = false;
-
-    stdexec::sync_wait(stdexec::when_all(stdexec::schedule(sched) | stdexec::then([&] {
-                                             try {
-                                                 std::array<char, 4> buf{};
-                                                 fiberexec::async_read(read_fd, std::as_writable_bytes(std::span{buf}),
-                                                                       std::nullopt, ss.get_token());
-                                             } catch (std::system_error const& e) {
-                                                 cancelled = (e.code().value() == ECANCELED);
-                                             }
-                                         }),
-                                         stdexec::schedule(sched) | stdexec::then([&] {
-                                             fiberexec::async_sleep_for(10ms);
-                                             ss.request_stop();
-                                         })));
-
-    ::close(read_fd);
-    ::close(write_fd);
-
-    REQUIRE(cancelled);
 }
 
 TEST_CASE("async_read cancelled automatically via sender stop token", "[cancellation]") {

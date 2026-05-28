@@ -30,17 +30,17 @@ void schedule_task(fiber_pool& pool, task work) noexcept;
 /// until the completion event arrives.  Returns the CQE result (negative errno
 /// on I/O failure).  Must be called from a fiber running on a fiberexec worker.
 ///
-/// If @p st is cancellable and stop is requested while the fiber is suspended,
-/// an IORING_OP_ASYNC_CANCEL is submitted and the return value will be
-/// -ECANCELED once the kernel confirms the cancellation.
-int submit_and_wait(io_uring_sqe* sqe, std::stop_token st = {});
+/// Cancellation is automatic: the fiber-local stop token (installed by
+/// schedule_sender or fiberexec::run) and the pool-wide stop token are both
+/// observed.  If either fires while the fiber is suspended, an
+/// IORING_OP_ASYNC_CANCEL is submitted and the return value will be -ECANCELED.
+int submit_and_wait(io_uring_sqe* sqe);
 
 /// Like submit_and_wait, but attaches a linked timeout to @p sqe via
 /// IORING_OP_LINK_TIMEOUT.  If @p timeout elapses before the op completes,
-/// the kernel cancels the op and returns -ECANCELED (same as explicit
-/// cancellation via a stop token).  Both SQEs are submitted in a single
-/// io_uring_submit call.
-int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout, std::stop_token st = {});
+/// the kernel cancels the op and returns -ECANCELED.  Both SQEs are submitted
+/// in a single io_uring_submit call.
+int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout);
 
 /// Install @p tok as the stop token for the currently running fiber.
 /// Called by operation::start() before invoking set_value on the receiver.

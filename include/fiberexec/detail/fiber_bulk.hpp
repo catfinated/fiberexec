@@ -57,8 +57,13 @@ template <class Shape, class Fun, class Receiver> struct fiber_bulk_receiver {
             return;
         }
 
+        // Propagate the launcher fiber's stop token into each worker fiber so
+        // that async ops inside fun() are cancellable via the P2300 stop chain.
+        auto tok = current_fiber_stop_token();
+
         for (Shape i = 0; i < n; ++i) {
-            schedule_task(*pool, [s, i] {
+            schedule_task(*pool, [s, i, tok] {
+                install_fiber_stop_token(tok);
                 try {
                     s->fun(i, static_cast<Shape>(i + 1));
                 } catch (...) {

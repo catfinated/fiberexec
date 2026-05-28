@@ -37,7 +37,6 @@
 #include <chrono>
 #include <latch>
 #include <span>
-#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -170,7 +169,6 @@ void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
     fiberexec::context ctx{num_threads};
     auto sched = ctx.get_scheduler();
     fiberexec::channel<int> ch{std::bit_ceil(static_cast<std::size_t>(num_conns) + 1)};
-    std::stop_source ss;
     std::atomic<int> n_accepted{0};
 
     std::thread srv([&] {
@@ -179,17 +177,13 @@ void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
                            [&] {
                                try {
                                    while (true) {
-                                       int fd = fiberexec::async_accept(listener, nullptr, nullptr, std::nullopt,
-                                                                        ss.get_token());
+                                       int fd = fiberexec::async_accept(listener, nullptr, nullptr);
                                        n_accepted.fetch_add(1, std::memory_order_release);
                                        if (ch.push(fd) != fiberexec::channel_op_status::success) {
                                            fiberexec::async_close(fd);
                                        }
                                    }
-                               } catch (std::system_error const& e) {
-                                   if (e.code().value() != ECANCELED) {
-                                       throw;
-                                   }
+                               } catch (std::system_error const&) {
                                }
                                ch.close();
                            }),
@@ -222,7 +216,7 @@ void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
 
     run_latency_loop(state, fds, lat);
 
-    ss.request_stop();
+    ::shutdown(listener, SHUT_RDWR);
     for (auto fd : fds) {
         ::close(fd);
     }

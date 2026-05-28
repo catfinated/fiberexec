@@ -12,7 +12,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <span>
-#include <stop_token>
 #include <string>
 #include <system_error>
 
@@ -34,11 +33,10 @@
 //                    (recv loop → echo → close → next fd)
 //
 // Shutdown sequence:
-//   1. The last test client calls ss.request_stop().
-//   2. async_accept observes the stop token and throws ECANCELED.
-//   3. The accept loop closes the channel and exits.
-//   4. Workers drain remaining connections, see the channel closed, and exit.
-//   5. when_all completes.
+//   1. The last test client calls ::shutdown(server_fd, SHUT_RDWR).
+//   2. async_accept returns an error (EINVAL); the accept loop closes the channel.
+//   3. Workers drain remaining connections, see the channel closed, and exit.
+//   4. when_all completes.
 
 namespace {
 
@@ -100,7 +98,6 @@ int main() {
     // With kWorkers=4 handling connections and kClients=8 arriving, up to
     // 3 connections will queue while all workers are busy.
     fiberexec::channel<int> conn_ch{8};
-    std::stop_source ss;
     std::atomic<int> clients_done{0};
 
     // Worker body: pop and handle connections until the channel is closed.
@@ -112,7 +109,7 @@ int main() {
     };
 
     // Test client: connect, send a message, receive the echo, disconnect.
-    // The last client to finish signals the server to shut down.
+    // The last client shuts down the listening socket to unblock async_accept.
     auto make_client = [&](int id) {
         return fiberexec::run(sched, [&, id] {
             int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -127,7 +124,7 @@ int main() {
             ::close(fd);
 
             if (clients_done.fetch_add(1, std::memory_order_acq_rel) == kClients - 1) {
-                ss.request_stop();
+                ::shutdown(server_fd, SHUT_RDWR);
             }
         });
     };
@@ -135,21 +132,19 @@ int main() {
     stdexec::sync_wait(stdexec::when_all(
         // Accept loop: push each accepted fd into the channel.
         // Suspends on push() if the channel is full (backpressure).
-        // Exits cleanly when the stop token fires.
+        // Exits when async_accept returns an error (the listening socket was
+        // shut down by the last client).
         fiberexec::run(sched,
                        [&] {
-                           try {
-                               while (true) {
-                                   int fd = fiberexec::async_accept(server_fd, nullptr, nullptr, std::nullopt,
-                                                                    ss.get_token());
+                           while (true) {
+                               try {
+                                   int fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
                                    if (conn_ch.push(fd) != fiberexec::channel_op_status::success) {
                                        ::close(fd);
                                        break;
                                    }
-                               }
-                           } catch (std::system_error const& e) {
-                               if (e.code().value() != ECANCELED) {
-                                   throw;
+                               } catch (std::system_error const&) {
+                                   break; // ECANCELED or EINVAL from shutdown — exit cleanly
                                }
                            }
                            conn_ch.close();

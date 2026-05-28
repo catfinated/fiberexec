@@ -53,13 +53,22 @@ constexpr uint64_t k_cancel_tag = 2;
 // ---------------------------------------------------------------------------
 class io_uring_scheduler : public boost::fibers::algo::algorithm {
 public:
-    io_uring_scheduler(
-        std::atomic<bool>* running, int work_efd, std::mutex* mtx, std::queue<task>* work_queue, std::size_t stack_size)
+    io_uring_scheduler(std::atomic<bool>* running,
+                       int work_efd,
+                       std::mutex* mtx,
+                       std::queue<task>* work_queue,
+                       std::size_t stack_size,
+                       std::atomic<std::size_t>* in_flight,
+                       boost::fibers::condition_variable* shutdown_cv,
+                       std::stop_token pool_stop_token)
         : running_{running}
         , work_efd_{work_efd}
         , mtx_{mtx}
         , work_queue_{work_queue}
         , stack_size_{stack_size}
+        , in_flight_{in_flight}
+        , shutdown_cv_{shutdown_cv}
+        , pool_stop_token_{std::move(pool_stop_token)}
         , notify_fd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
         if (notify_fd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd (notify)");
@@ -152,6 +161,8 @@ public:
         ::write(notify_fd_, &val, sizeof(val));
     }
 
+    std::stop_token pool_stop_token() const noexcept { return pool_stop_token_; }
+
 private:
     static constexpr unsigned k_ring_entries = 256;
 
@@ -185,6 +196,18 @@ private:
         }
     }
 
+    void launch_fiber(task work) noexcept {
+        in_flight_->fetch_add(1, std::memory_order_relaxed);
+        auto tracked = [fn = std::move(work), in_flight = in_flight_, cv = shutdown_cv_]() mutable {
+            fn();
+            if (in_flight->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                cv->notify_all();
+            }
+        };
+        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_}, std::move(tracked))
+            .detach();
+    }
+
     // Process every CQE currently in the ring. Creates fibers for new work,
     // resumes I/O-suspended fibers, and re-arms the watched fds.
     void drain_cqes() noexcept {
@@ -206,9 +229,7 @@ private:
                         }
                     }
                     if (work) {
-                        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{stack_size_},
-                                             std::move(work))
-                            .detach();
+                        launch_fiber(std::move(work));
                     }
                 }
                 // Guard re-arm: an unconditional re-arm after the stop token
@@ -235,6 +256,9 @@ private:
     std::mutex* mtx_;              // non-owning — shared work queue mutex
     std::queue<task>* work_queue_; // non-owning — shared work queue
     std::size_t stack_size_;
+    std::atomic<std::size_t>* in_flight_;            // non-owning — tracks live user fibers
+    boost::fibers::condition_variable* shutdown_cv_; // non-owning — pool drain signal
+    std::stop_token pool_stop_token_;
     int notify_fd_;
     io_uring ring_{};
     mutable std::mutex ready_mtx_;
@@ -266,25 +290,25 @@ std::stop_token current_fiber_stop_token() {
     return p != nullptr ? *p : std::stop_token{};
 }
 
-int submit_and_wait(io_uring_sqe* sqe, std::stop_token st) {
+int submit_and_wait(io_uring_sqe* sqe) {
     io_awaitable awaitable;
     auto future = awaitable.promise.get_future();
     io_uring_sqe_set_data(sqe, std::addressof(awaitable));
     if (int ret = io_uring_submit(tl_ring); ret < 0) {
         throw std::system_error(-ret, std::system_category(), "io_uring_submit");
     }
-    if (st.stop_possible()) {
-        // Capture scheduler pointer now; tl_scheduler is thread-local and
-        // the callback may fire from a different thread.
-        auto* sched = tl_scheduler;
-        std::stop_callback cb{std::move(st),
-                              [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); }};
-        return future.get(); // cb destructs here, deregistering the callback
+    auto* sched = tl_scheduler;
+    auto const cancel = [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); };
+    std::stop_callback pool_cb{sched->pool_stop_token(), cancel};
+    auto fiber_st = current_fiber_stop_token();
+    if (fiber_st.stop_possible()) {
+        std::stop_callback fiber_cb{std::move(fiber_st), cancel};
+        return future.get();
     }
-    return future.get(); // suspends this fiber until the CQE arrives
+    return future.get();
 }
 
-int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout, std::stop_token st) {
+int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds timeout) {
     // Chain a linked timeout: the kernel cancels sqe if it doesn't complete
     // within timeout, returning -ECANCELED for the op and -ETIME for the
     // timeout SQE (which drain_cqes discards via k_cancel_tag).
@@ -309,10 +333,12 @@ int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds tim
     if (int ret = io_uring_submit(tl_ring); ret < 0) {
         throw std::system_error(-ret, std::system_category(), "io_uring_submit");
     }
-    if (st.stop_possible()) {
-        auto* sched = tl_scheduler;
-        std::stop_callback cb{std::move(st),
-                              [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); }};
+    auto* sched = tl_scheduler;
+    auto const cancel = [sched, ud = std::addressof(awaitable)]() noexcept { sched->request_cancel(ud); };
+    std::stop_callback pool_cb{sched->pool_stop_token(), cancel};
+    auto fiber_st = current_fiber_stop_token();
+    if (fiber_st.stop_possible()) {
+        std::stop_callback fiber_cb{std::move(fiber_st), cancel};
         return future.get();
     }
     return future.get();
@@ -366,15 +392,21 @@ public:
 private:
     void worker() {
         boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(&running_, eventfd_, &mtx_, &work_queue_,
-                                                                    stack_size_);
+                                                                    stack_size_, &in_flight_, &shutdown_cv_,
+                                                                    pool_stop_source_.get_token());
 
         // Park the main fiber here. The scheduler's suspend_until() drives all
         // io_uring and fiber dispatch. stop() notifies the CV to unblock us.
+        // We also wait for all in-flight fibers to drain before exiting.
         std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
-        shutdown_cv_.wait(lk, [this] { return !running_.load(std::memory_order_relaxed); });
+        shutdown_cv_.wait(lk, [this] {
+            return !running_.load(std::memory_order_relaxed) && in_flight_.load(std::memory_order_acquire) == 0;
+        });
     }
 
     void stop() {
+        // Cancel all pending I/O so suspended fibers unblock and complete.
+        pool_stop_source_.request_stop();
         std::unique_lock<boost::fibers::mutex> lk{shutdown_mtx_};
         running_.store(false, std::memory_order_release);
         // notify_all wakes every parked main fiber via each scheduler's notify(),
@@ -387,6 +419,8 @@ private:
     std::atomic<bool> running_;
     std::size_t stack_size_;
     int eventfd_;
+    std::atomic<std::size_t> in_flight_{0};
+    std::stop_source pool_stop_source_;
     std::vector<std::thread> threads_;
     std::mutex mtx_;
     std::queue<task> work_queue_;
