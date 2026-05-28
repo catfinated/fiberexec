@@ -7,6 +7,7 @@ function(add_bench name)
 endfunction()
 
 add_bench(bench_scheduler bench_scheduler.cpp)
+add_bench(bench_task bench_task.cpp)
 add_bench(bench_echo bench_echo.cpp)
 target_link_libraries(bench_echo PRIVATE asioexec_iface)
 add_bench(bench_fanout bench_fanout.cpp)

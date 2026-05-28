@@ -29,7 +29,7 @@ a fiberexec-namespaced `channel_op_status` enum. See
 The benchmark suite is the primary deliverable of the project; hardening it is
 the highest-leverage work remaining.
 
-### Raw io_uring baseline
+### ~~Raw io_uring baseline~~ ✅ done
 
 The current benchmarks compare fiberexec against thread-per-connection, Asio
 coroutines, and asioexec, but there is no hand-rolled io_uring control — a

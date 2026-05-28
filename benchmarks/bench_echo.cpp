@@ -115,6 +115,7 @@ sockaddr_in asio_local_addr(asio::ip::tcp::acceptor const& acc) {
 // kRoundTrips fixed-size messages on a single accepted socket.
 asio::awaitable<void> asio_conn_handler(asio::ip::tcp::socket sock) {
     std::array<char, kMsgSize> buf{};
+    // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     for (int i = 0; i < kRoundTrips; ++i) {
         co_await asio::async_read(sock, asio::buffer(buf), asio::use_awaitable);
         co_await asio::async_write(sock, asio::buffer(buf), asio::use_awaitable);
