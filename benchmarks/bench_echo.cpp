@@ -11,10 +11,10 @@
 #include <boost/asio.hpp>
 // clang-format on
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <common/asio_helpers.hpp>
+#include <common/tcp_helpers.hpp>
+
 #include <sys/resource.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <liburing.h>
@@ -38,26 +38,6 @@ namespace {
 constexpr int kRoundTrips = 100;
 // Small fixed payload — fits in a single TCP segment on loopback.
 constexpr std::size_t kMsgSize = 64;
-
-int make_server_socket() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0; // let the kernel assign a free port
-    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    ::listen(fd, 4096); // large backlog so all clients can connect up-front
-    return fd;
-}
-
-sockaddr_in bound_addr(int fd) {
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    return addr;
-}
 
 // Client: runs in an OS thread with blocking syscalls.
 // The same client code is used for all server benchmarks so client-side
@@ -99,17 +79,6 @@ void thread_conn_handler(int conn_fd) {
 // ---------------------------------------------------------------------------
 // Asio helpers — shared by BM_AsioEchoServer and BM_AsioExecEchoServer.
 // ---------------------------------------------------------------------------
-
-// Convert an Asio acceptor's bound endpoint to a sockaddr_in so the existing
-// run_blocking_client helper can connect to it.
-sockaddr_in asio_local_addr(asio::ip::tcp::acceptor const& acc) {
-    auto ep = acc.local_endpoint();
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(ep.port());
-    return addr;
-}
 
 // Connection handler used by both Asio benchmarks.  Reads and echoes
 // kRoundTrips fixed-size messages on a single accepted socket.

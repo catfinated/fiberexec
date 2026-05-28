@@ -30,6 +30,7 @@ option(FIBEREXEC_BUILD_BENCHMARKS "Build benchmarks (requires Google Benchmark)"
 include(cmake/Dependencies.cmake)
 
 add_subdirectory(src)
+add_subdirectory(common)
 
 if(FIBEREXEC_BUILD_TESTS)
   enable_testing()

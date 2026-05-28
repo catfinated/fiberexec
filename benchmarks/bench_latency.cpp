@@ -25,9 +25,9 @@
 #include <benchmark/benchmark.h>
 #include <liburing.h>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <common/asio_helpers.hpp>
+#include <common/tcp_helpers.hpp>
+
 #include <unistd.h>
 
 #include <algorithm>
@@ -49,35 +49,6 @@ constexpr std::size_t kMsg = 64;
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-int make_listener() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    ::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-    ::listen(fd, 512);
-    return fd;
-}
-
-sockaddr_in get_addr(int fd) {
-    sockaddr_in a{};
-    socklen_t len = sizeof(a);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-    return a;
-}
-
-sockaddr_in asio_addr(asio::ip::tcp::acceptor const& acc) {
-    auto ep = acc.local_endpoint();
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(ep.port());
-    return a;
-}
 
 void report_percentiles(benchmark::State& state, std::vector<int64_t>& lat) {
     std::ranges::sort(lat);
@@ -163,8 +134,8 @@ int g_lat_accept_sentinel{}; // NOLINT(cppcoreguidelines-avoid-non-const-global-
 void fiber_echo_latency_impl(benchmark::State& state, unsigned num_threads) {
     int64_t const num_conns = state.range(0);
 
-    int listener = make_listener();
-    sockaddr_in const addr = get_addr(listener);
+    int listener = make_server_socket();
+    sockaddr_in const addr = bound_addr(listener);
 
     fiberexec::context ctx{num_threads};
     auto sched = ctx.get_scheduler();
@@ -258,8 +229,8 @@ BENCHMARK(BM_FiberEchoLatencyNT)->Arg(1)->Arg(10)->UseManualTime()->MinTime(5.0)
 void BM_ThreadEchoLatency(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
-    int listener = make_listener();
-    sockaddr_in const addr = get_addr(listener);
+    int listener = make_server_socket();
+    sockaddr_in const addr = bound_addr(listener);
 
     std::latch done{num_conns};
     std::atomic<int> n_accepted{0};
@@ -344,7 +315,7 @@ void BM_AsioEchoLatency(benchmark::State& state) {
 
     asio::thread_pool pool{std::thread::hardware_concurrency()};
     asio::ip::tcp::acceptor acceptor{pool.get_executor(), {asio::ip::address_v4::loopback(), 0}};
-    sockaddr_in const addr = asio_addr(acceptor);
+    sockaddr_in const addr = asio_local_addr(acceptor);
 
     std::latch done{num_conns};
     std::atomic<int> n_accepted{0};
@@ -378,8 +349,8 @@ BENCHMARK(BM_AsioEchoLatency)->Arg(1)->Arg(10)->Arg(100)->UseManualTime()->MinTi
 void BM_IoUringEchoLatency(benchmark::State& state) {
     int64_t const num_conns = state.range(0);
 
-    int listener = make_listener();
-    sockaddr_in const addr = get_addr(listener);
+    int listener = make_server_socket();
+    sockaddr_in const addr = bound_addr(listener);
 
     std::atomic<int> n_accepted{0};
 

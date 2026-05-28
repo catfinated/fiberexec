@@ -28,10 +28,10 @@
 #include <benchmark/benchmark.h>
 #include <liburing.h>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <common/asio_helpers.hpp>
+#include <common/tcp_helpers.hpp>
+
 #include <sys/resource.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
@@ -55,35 +55,6 @@ constexpr auto kDelay = 1ms;
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-int make_server_socket() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    ::listen(fd, 4096);
-    return fd;
-}
-
-sockaddr_in bound_addr(int fd) {
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    return addr;
-}
-
-sockaddr_in asio_local_addr(asio::ip::tcp::acceptor const& acc) {
-    auto ep = acc.local_endpoint();
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(ep.port());
-    return addr;
-}
 
 // Blocking client — identical across all server benchmarks so client overhead
 // does not skew the comparison.

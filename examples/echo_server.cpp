@@ -2,9 +2,8 @@
 
 #include <stdexec/execution.hpp>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <common/tcp_helpers.hpp>
+
 #include <unistd.h>
 
 #include <array>
@@ -23,32 +22,6 @@
 namespace {
 
 constexpr int kClients = 3;
-
-int make_server_socket() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        std::perror("socket");
-        return -1;
-    }
-    int opt = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0; // let the kernel pick a free port
-
-    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    ::listen(fd, kClients);
-    return fd;
-}
-
-sockaddr_in bound_addr(int server_fd) {
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    ::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    return addr;
-}
 
 } // namespace
 

@@ -2,9 +2,8 @@
 
 #include <stdexec/execution.hpp>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <common/tcp_helpers.hpp>
+
 #include <unistd.h>
 
 #include <array>
@@ -42,30 +41,6 @@ namespace {
 
 constexpr int kWorkers = 4;
 constexpr int kClients = 8; // intentionally > kWorkers to exercise queuing
-
-int make_server_socket() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        std::perror("socket");
-        return -1;
-    }
-    int opt = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    ::listen(fd, 32);
-    return fd;
-}
-
-sockaddr_in bound_addr(int fd) {
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    return addr;
-}
 
 // Echo all bytes received on fd back to the sender until the client closes.
 // Called from a worker fiber — async_recv/send suspend the fiber, not the thread.
