@@ -27,3 +27,6 @@ target_link_libraries(echo_to_file PRIVATE fiberexec::fiberexec fiberexec_common
 
 add_executable(echo_server_multishot echo_server_multishot.cpp)
 target_link_libraries(echo_server_multishot PRIVATE fiberexec::fiberexec fiberexec_common)
+
+add_executable(stream_recv_multishot stream_recv_multishot.cpp)
+target_link_libraries(stream_recv_multishot PRIVATE fiberexec::fiberexec fiberexec_common)

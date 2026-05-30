@@ -110,13 +110,25 @@ The buffer is returned to the ring when the handle is destroyed. `next()` return
 `nullopt` on EOF, cancellation, or `EINVAL`. The destructor cancels any in-flight
 SQE and drains remaining data automatically.
 
-### Registered buffers / buffer rings
+### ~~Kernel buffer rings~~ ✅ done (via multishot_recv)
 
-`io_uring_register_buffers` pins user buffers so the kernel can DMA directly
-without an extra copy on each op. For high-throughput recv/send this can matter.
-`IORING_OP_PROVIDE_BUFFERS` (buffer rings) goes further: lets the kernel pick
-from a pool of pre-registered buffers, avoiding a recv-per-fiber allocation.
-Both are niche but interesting to benchmark.
+`multishot_recv` uses `io_uring_setup_buf_ring`, which registers a shared
+ring buffer via `IORING_REGISTER_PBUF_RING` — the newer mmap-based mechanism
+introduced in kernel 5.19. The kernel selects a slot from the ring for each
+arriving message and writes data directly into it; userspace accesses the data
+via `received_buffer::data()` with no intermediate copy and no per-recv heap
+allocation. Buffers are returned to the ring when the `received_buffer` handle
+is destroyed.
+
+The older `IORING_OP_PROVIDE_BUFFERS` SQE-based approach requires a round-trip
+through the submission queue to replenish the pool; `IORING_REGISTER_PBUF_RING`
+avoids this entirely by sharing the ring between kernel and userspace via a
+memory mapping.
+
+`io_uring_register_buffers` (`IORING_REGISTER_BUFFERS`) is a separate, still
+open feature: it pins arbitrary user buffers so the kernel can DMA directly
+without mapping them on each op. Useful for high-throughput send paths but not
+yet wired up.
 
 ### Fixed file descriptors (`io_uring_register_files`)
 
