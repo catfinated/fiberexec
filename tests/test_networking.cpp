@@ -19,12 +19,40 @@
 #include <system_error>
 #include <vector>
 
-TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking]") {
-    fiberexec::context ctx{2};
+namespace {
+
+struct bound_server {
+    int fd;
+    sockaddr_in addr;
+};
+
+std::array<int, 2> make_socket_pair() {
     std::array<int, 2> sv{};
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
-    auto [recv_fd, send_fd] = sv;
+    return sv;
+}
 
+bound_server make_bound_server(int backlog = 1) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(fd >= 0);
+    int opt = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    REQUIRE(::listen(fd, backlog) == 0);
+    socklen_t addrlen = sizeof(addr);
+    REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == 0);
+    return {.fd = fd, .addr = addr};
+}
+
+} // namespace
+
+TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking]") {
+    auto [recv_fd, send_fd] = make_socket_pair();
+    fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     constexpr std::string_view kMsg = "ping";
     std::array<char, 4> buf{};
@@ -43,22 +71,7 @@ TEST_CASE("async_recv and async_send exchange data via socketpair", "[networking
 }
 
 TEST_CASE("async_accept and async_connect establish a TCP connection", "[networking]") {
-    int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    REQUIRE(server_fd >= 0);
-
-    int opt = 1;
-    ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-
-    REQUIRE(::bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    REQUIRE(::listen(server_fd, 1) == 0);
-
-    socklen_t addrlen = sizeof(addr);
-    REQUIRE(::getsockname(server_fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == 0);
+    auto [server_fd, addr] = make_bound_server();
 
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
@@ -91,10 +104,7 @@ TEST_CASE("async_accept and async_connect establish a TCP connection", "[network
 TEST_CASE("async_recv cancelled automatically via sender stop token", "[networking][cancellation]") {
     // when_all error branch cancels the blocked recv — no explicit stop token.
     using namespace std::chrono_literals;
-    std::array<int, 2> sv{};
-    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
-    auto [recv_fd, send_fd] = sv;
-
+    auto [recv_fd, send_fd] = make_socket_pair();
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
     bool auto_cancelled = false;
@@ -139,7 +149,7 @@ TEST_CASE("cancel queue drains correctly under load with many concurrent async_r
     // Empty read ends — every async_recv blocks until cancelled.
     std::vector<std::array<int, 2>> pairs(N);
     for (auto& p : pairs) {
-        REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, p.data()) == 0);
+        p = make_socket_pair();
     }
 
     std::atomic<int> cancelled{0};
@@ -179,10 +189,7 @@ TEST_CASE("async_recv with timeout fires ECANCELED when no data arrives", "[netw
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
-    std::array<int, 2> sv{};
-    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
-    auto [recv_fd, send_fd] = sv;
-
+    auto [recv_fd, send_fd] = make_socket_pair();
     bool timed_out = false;
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         char buf{};
@@ -199,15 +206,46 @@ TEST_CASE("async_recv with timeout fires ECANCELED when no data arrives", "[netw
     REQUIRE(timed_out);
 }
 
+TEST_CASE("multishot_acceptor accepts multiple connections with one SQE", "[networking][multishot]") {
+    auto [server_fd, addr] = make_bound_server(128);
+
+    constexpr int kClients = 8;
+    fiberexec::context ctx{4};
+    auto sched = ctx.get_scheduler();
+    std::atomic<int> accepted{0};
+
+    auto make_client = [&] {
+        return fiberexec::run(sched, [&] {
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+            ::close(fd);
+        });
+    };
+
+    stdexec::sync_wait(
+        stdexec::when_all(fiberexec::run(sched,
+                                         [&] {
+                                             fiberexec::multishot_acceptor acc{server_fd, nullptr, nullptr};
+                                             while (auto fd = acc.next()) {
+                                                 fiberexec::async_close(*fd);
+                                                 if (accepted.fetch_add(1, std::memory_order_acq_rel) == kClients - 1) {
+                                                     ::shutdown(server_fd, SHUT_RDWR);
+                                                 }
+                                             }
+                                         }),
+                          make_client(), make_client(), make_client(), make_client(), make_client(), make_client(),
+                          make_client(), make_client()));
+
+    ::close(server_fd);
+    REQUIRE(accepted.load() == kClients);
+}
+
 TEST_CASE("async_recv with timeout completes normally when data arrives in time", "[networking][timeout]") {
     using namespace std::chrono_literals;
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
 
-    std::array<int, 2> sv{};
-    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
-    auto [recv_fd, send_fd] = sv;
-
+    auto [recv_fd, send_fd] = make_socket_pair();
     constexpr char kByte = 42;
     char result{};
     stdexec::sync_wait(

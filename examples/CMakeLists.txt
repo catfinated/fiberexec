@@ -24,3 +24,6 @@ target_link_libraries(sync_wait_fanout PRIVATE fiberexec::fiberexec)
 
 add_executable(echo_to_file echo_to_file.cpp)
 target_link_libraries(echo_to_file PRIVATE fiberexec::fiberexec fiberexec_common)
+
+add_executable(echo_server_multishot echo_server_multishot.cpp)
+target_link_libraries(echo_server_multishot PRIVATE fiberexec::fiberexec fiberexec_common)

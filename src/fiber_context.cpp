@@ -1,5 +1,7 @@
 #include <fiberexec/context.hpp>
 
+#include <fiberexec/detail/cqe_handler.hpp>
+
 #include <boost/fiber/all.hpp>
 #include <liburing.h>
 #include <sys/eventfd.h>
@@ -29,8 +31,10 @@ thread_local io_uring_scheduler* tl_scheduler = nullptr; // NOLINT(cppcoreguidel
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 boost::fibers::fiber_specific_ptr<std::stop_token> fiber_stop_token;
 
-// Parked on the suspended fiber's stack; pointer lives in sqe->user_data.
-struct io_awaitable {
+// Parked on the suspended fiber's stack; pointer (upcast to cqe_handler*)
+// lives in sqe->user_data. complete() delivers the CQE result to the fiber.
+struct io_awaitable : detail::cqe_handler {
+    void complete(io_uring* /*ring*/, int res, uint32_t /*flags*/) noexcept override { promise.set_value(res); }
     boost::fibers::promise<int> promise;
 };
 
@@ -277,6 +281,7 @@ private:
         while (io_uring_peek_cqe(&ring_, &cqe) == 0 && cqe != nullptr) {
             auto const tag = io_uring_cqe_get_data64(cqe);
             int const res = cqe->res;
+            uint32_t const flags = cqe->flags;
             io_uring_cqe_seen(&ring_, cqe);
             cqe = nullptr;
 
@@ -305,10 +310,9 @@ private:
             } else if (tag == k_cancel_tag) {
                 // Cancel op completed (res==0 found, -ENOENT not found): ignore.
             } else {
-                // I/O completion — resume the suspended fiber.
+                // I/O completion — dispatch to the registered handler.
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-                auto* awaitable = reinterpret_cast<io_awaitable*>(tag);
-                awaitable->promise.set_value(res);
+                reinterpret_cast<detail::cqe_handler*>(tag)->complete(&ring_, res, flags);
             }
         }
     }
@@ -348,7 +352,7 @@ std::stop_token current_fiber_stop_token() {
 int submit_and_wait(io_uring_sqe* sqe) {
     io_awaitable awaitable;
     auto future = awaitable.promise.get_future();
-    io_uring_sqe_set_data(sqe, std::addressof(awaitable));
+    io_uring_sqe_set_data(sqe, static_cast<detail::cqe_handler*>(std::addressof(awaitable)));
     if (int ret = io_uring_submit(tl_ring); ret < 0) {
         throw std::system_error(-ret, std::system_category(), "io_uring_submit");
     }
@@ -371,7 +375,7 @@ int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds tim
 
     io_awaitable awaitable;
     auto future = awaitable.promise.get_future();
-    io_uring_sqe_set_data(sqe, std::addressof(awaitable));
+    io_uring_sqe_set_data(sqe, static_cast<detail::cqe_handler*>(std::addressof(awaitable)));
 
     io_uring_sqe* tsqe = io_uring_get_sqe(tl_ring);
     if (tsqe == nullptr) {

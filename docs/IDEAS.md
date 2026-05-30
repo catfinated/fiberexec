@@ -76,32 +76,28 @@ submits both atomically. Timeout fires → op gets `-ECANCELED` (throws
 `std::system_error(ECANCELED)`). Buffers were also migrated to
 `std::span<std::byte>` / `std::span<std::byte const>` in the same commit.
 
-### Multi-shot accept (`IORING_ACCEPT_MULTISHOT`)
+### ~~Multi-shot accept (`IORING_ACCEPT_MULTISHOT`)~~ ✅ done
 
-Today `async_accept` submits one SQE per accepted connection. For a server with
-many short-lived connections this is wasteful. `IORING_ACCEPT_MULTISHOT` (5.19+)
-keeps a single SQE in flight and posts a CQE for each new connection. This
-requires a different API shape (the call doesn't return a single fd; it's more
-like a generator) but would dramatically reduce SQE overhead for accept-heavy
-workloads.
+Implemented as `fiberexec::multishot_acceptor` (`include/fiberexec/multishot_acceptor.hpp`,
+`src/multishot_acceptor.cpp`). One SQE stays armed for the lifetime of the
+object; the scheduler rearms it automatically when `IORING_CQE_F_MORE` is
+absent (resource pressure). `next()` suspends the calling fiber until a
+connection arrives, draining any buffered fds from prior CQEs before blocking.
+See `examples/echo_server_multishot.cpp` for a drop-in replacement of the
+`echo_server_pool` accept loop.
 
-`IORING_ACCEPT_MULTISHOT` is also the natural kernel primitive for a future
-P2300 *sequence sender* — a sender that emits `set_next(fd)` once per
-accepted connection and terminates only on error or cancellation. Sequence
-senders are under active development in stdexec under `experimental::execution`
-(sequence_senders.hpp). `exec::iterate` exists today but only wraps C++ ranges,
-not open-ended async producers. Bridging `IORING_ACCEPT_MULTISHOT` to the
-sequence sender model would require a custom sequence sender built with
-`exec::create` or a coroutine-based async generator — neither of which has a
-standard shape yet. The open composition problem remains: structured concurrency
-requires the sequence to own each handler's lifetime, but waiting for one
-handler before accepting the next serialises the server. `exec::merge_each`
-(also in stdexec experimental) is the intended combinator for running handlers
-concurrently from a sequence, but its interaction with an unbounded async source
-is not yet proven in practice. The `echo_server_pool` pattern — accept loop
-pushing into a bounded `channel`, drained by a fixed worker pool —
-implements this manually today and would be the reference point for any future
-sequence-sender port.
+The implementation prompted a general CQE dispatch refactor: `drain_cqes()`
+now routes all non-sentinel CQEs through a `detail::cqe_handler` virtual
+dispatch rather than casting to `io_awaitable*` directly. This makes adding
+`IORING_RECV_MULTISHOT` and `IORING_POLL_ADD_MULTI` purely additive — new
+subclasses with no changes to `drain_cqes()`. See ADR-0003.
+
+The sequence-sender angle (a sender that emits `set_next(fd)` once per
+connection) remains an open research question. `exec::merge_each` (stdexec
+experimental) is the intended combinator but its interaction with an unbounded
+async source is not yet proven in practice. The `multishot_acceptor` + bounded
+`channel` + fixed worker pool pattern is the correct approach today and would
+be the reference point for any future sequence-sender port.
 
 ### Registered buffers / buffer rings
 
