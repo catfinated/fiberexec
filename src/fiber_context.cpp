@@ -403,6 +403,19 @@ int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds tim
     return future.get();
 }
 
+void submit_cancel(void* handler) noexcept {
+    if (tl_ring == nullptr) {
+        return;
+    }
+    io_uring_sqe* sqe = io_uring_get_sqe(tl_ring);
+    if (sqe == nullptr) {
+        return;
+    }
+    io_uring_prep_cancel(sqe, handler, 0);
+    io_uring_sqe_set_data64(sqe, k_cancel_tag);
+    io_uring_submit(tl_ring);
+}
+
 void schedule_task(fiber_pool& pool, task work) noexcept { pool.post(std::move(work)); }
 
 } // namespace detail

@@ -247,7 +247,7 @@ See `examples/echo_server_pool.cpp` for the full working server and `examples/ch
 - CMake 3.25+
 - Clang (the presets default to `clang++`)
 - [vcpkg](https://github.com/microsoft/vcpkg) with `VCPKG_ROOT` set in your environment
-- Linux kernel 5.10+ (io_uring)
+- Linux kernel 6.0+ (io_uring with multishot recv)
 
 Boost.Fiber, Boost.Context, liburing, and Catch2 are installed automatically by
 vcpkg on first configure. stdexec is fetched from GitHub via CMake's
@@ -428,7 +428,7 @@ This is a research project and learning exercise. It is not production-ready.
 | liburing      | vcpkg        | 2.4+    | io_uring userspace interface      |
 | Catch2        | vcpkg        | 3.9+    | Test framework                    |
 | C++ standard  | —            | C++20   | Concepts, constraints, coroutines |
-| Linux kernel  | —            | 5.10+   | io_uring support                  |
+| Linux kernel  | —            | 6.0+    | io_uring with multishot recv      |
 
 ## License
 

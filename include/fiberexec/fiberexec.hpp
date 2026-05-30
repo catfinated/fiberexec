@@ -11,5 +11,6 @@
 #include <fiberexec/channel.hpp>
 #include <fiberexec/context.hpp>
 #include <fiberexec/multishot_acceptor.hpp>
+#include <fiberexec/multishot_recv.hpp>
 #include <fiberexec/run.hpp>
 #include <fiberexec/sync_wait.hpp>

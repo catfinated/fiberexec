@@ -2,6 +2,7 @@ add_library(fiberexec
   fiber_context.cpp
   async_io.cpp
   multishot_acceptor.cpp
+  multishot_recv.cpp
 )
 
 add_library(fiberexec::fiberexec ALIAS fiberexec)

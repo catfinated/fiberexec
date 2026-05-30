@@ -99,6 +99,17 @@ async source is not yet proven in practice. The `multishot_acceptor` + bounded
 `channel` + fixed worker pool pattern is the correct approach today and would
 be the reference point for any future sequence-sender port.
 
+### ~~Multi-shot recv (`IORING_RECV_MULTISHOT`)~~ ✅ done
+
+Implemented as `fiberexec::multishot_recv` (`include/fiberexec/multishot_recv.hpp`,
+`src/multishot_recv.cpp`). One SQE stays armed; each arriving message causes the
+kernel to select a buffer from a pre-registered buffer ring, write data into it,
+and deliver a CQE. `next()` returns a `received_buffer` RAII handle whose
+`data()` span points directly into the kernel-selected buffer — zero extra copies.
+The buffer is returned to the ring when the handle is destroyed. `next()` returns
+`nullopt` on EOF, cancellation, or `EINVAL`. The destructor cancels any in-flight
+SQE and drains remaining data automatically.
+
 ### Registered buffers / buffer rings
 
 `io_uring_register_buffers` pins user buffers so the kernel can DMA directly

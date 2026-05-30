@@ -263,3 +263,39 @@ TEST_CASE("async_recv with timeout completes normally when data arrives in time"
 
     REQUIRE(result == kByte);
 }
+
+TEST_CASE("multishot_recv delivers data and returns nullopt on EOF", "[networking][multishot]") {
+    auto [recv_fd, send_fd] = make_socket_pair();
+
+    fiberexec::context ctx{2};
+    auto sched = ctx.get_scheduler();
+
+    constexpr std::string_view kMsg1 = "hello";
+    constexpr std::string_view kMsg2 = "world";
+    constexpr std::size_t buf_size{256UL};
+    constexpr std::size_t buf_count{8UL};
+    std::string received;
+
+    stdexec::sync_wait(stdexec::when_all(
+        fiberexec::run(sched,
+                       [&] {
+                           fiberexec::multishot_recv mr{recv_fd, buf_size, buf_count};
+                           while (auto buf = mr.next()) {
+                               auto span = buf->data();
+                               received.append(reinterpret_cast<char const*>(span.data()), span.size());
+                           }
+                       }),
+        fiberexec::run(sched, [&] {
+            fiberexec::async_send(send_fd, std::as_bytes(std::span<char const>{kMsg1.data(), kMsg1.size()}));
+            fiberexec::async_send(send_fd, std::as_bytes(std::span<char const>{kMsg2.data(), kMsg2.size()}));
+            fiberexec::async_close(send_fd);
+            send_fd = -1;
+        })));
+
+    ::close(recv_fd);
+    if (send_fd >= 0) {
+        ::close(send_fd);
+    }
+
+    REQUIRE(received == std::string(kMsg1) + std::string(kMsg2));
+}
