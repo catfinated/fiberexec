@@ -13,6 +13,8 @@ io_uring async I/O with fiber ergonomics and P2300 structured concurrency.
   - [Fibers + senders](#fibers--senders)
   - [stdexec::bulk — parallel fan-out](#stdexecbulk--parallel-fan-out)
   - [channel\<T\> — producer/consumer and accept loops](#channelt--producerconsumer-and-accept-loops)
+  - [multishot_recv — streaming zero-copy receive](#multishot_recv--streaming-zero-copy-receive)
+  - [fixed_buffer_pool and async_send_zc — zero-copy sends](#fixed_buffer_pool-and-async_send_zc--zero-copy-sends)
 - [Building](#building)
   - [Prerequisites](#prerequisites)
   - [Configure and build](#configure-and-build)
@@ -205,7 +207,7 @@ The C++26 standard defers this. stdexec includes experimental sequence senders (
 The accept loop pattern uses this directly:
 
 ```cpp
-fiberexec::channel<int> conn_ch{8}; // bounded queue, 7 usable slots
+fiberexec::channel<int> conn_ch{8}; // bounded queue, backlog of 8
 std::stop_source ss;
 
 stdexec::sync_wait(stdexec::when_all(
@@ -239,6 +241,43 @@ stdexec::sync_wait(stdexec::when_all(
 The channel capacity provides natural backpressure: if all workers are busy handling connections, `push` suspends the acceptor cooperatively rather than accepting connections that will immediately queue unhandled. Shutdown is coordinated through `close()`: the accept loop closes the channel after catching `ECANCELED`, workers drain any remaining connections, and `when_all` completes.
 
 See `examples/echo_server_pool.cpp` for the full working server and `examples/channel_backpressure.cpp` for an isolated demonstration of the cooperative suspension behaviour under backpressure.
+
+### `multishot_recv` — streaming zero-copy receive
+
+`multishot_recv` arms a single `IORING_RECV_MULTISHOT` SQE against a kernel-managed buffer ring (`IORING_REGISTER_PBUF_RING`). The kernel selects a free buffer slot, fills it with incoming data, and delivers a CQE — with no copy through an intermediate kernel buffer. The SQE stays armed; the kernel re-uses it for subsequent data without the fiber needing to resubmit.
+
+```cpp
+fiberexec::multishot_recv mr{conn_fd, /*buf_size=*/4096, /*buf_count=*/256};
+while (auto buf = mr.next()) {   // suspends fiber until data or EOF
+    process(buf->data());        // zero-copy span into the kernel buffer slot
+    // buf destroyed here → slot returned to the kernel ring
+}
+```
+
+`next()` returns `std::nullopt` on EOF or connection close, making it natural to drive with a `while` loop. Because the kernel fills each buffer slot with however much data is in the socket receive buffer at selection time, the number of CQEs is often fewer than the number of sends — multiple small sends that arrive before the kernel selects the next slot land in a single buffer and produce one CQE.
+
+`multishot_recv` requires Linux 6.0+. See `examples/stream_recv_multishot.cpp` for a self-contained demonstration.
+
+### `fixed_buffer_pool` and `async_send_zc` — zero-copy sends
+
+`fixed_buffer_pool` pre-registers a set of user-space buffers with the kernel once via `IORING_REGISTER_BUFFERS`. Subsequent sends reference them by index rather than pointer, eliminating the per-operation memory pin/unpin that ordinary sends incur. `async_send_zc` submits `IORING_OP_SEND_ZC` with `IORING_RECVSEND_FIXED_BUF`, reading directly from the registered buffer without an intermediate copy.
+
+```cpp
+fiberexec::fixed_buffer_pool pool{/*buf_size=*/64, /*buf_count=*/8};
+
+for (int i = 0; i < kMessages; ++i) {
+    auto fb = pool.borrow();          // suspends fiber if all slots are in flight
+    fill(fb.data(), i);               // write directly into the registered buffer
+    fiberexec::async_send_zc(fd, fb, fb.data().size());
+    // fb destroyed → slot returned to pool, ready for the next borrow
+}
+```
+
+`borrow()` suspends the calling fiber (not the OS thread) when all slots are in flight, providing natural backpressure. `async_send_zc` waits for both the send completion CQE and the kernel's buffer-release notification CQE before returning, ensuring the buffer is safe to reuse. Only one `fixed_buffer_pool` may be active per worker thread at a time (the kernel allows one registered buffer table per ring); constructing a second throws `std::system_error(EBUSY)`.
+
+Combined with `multishot_recv`, these two primitives eliminate the userspace copy on both ends of a streaming path: no intermediate kernel socket buffer on the send side, and no copy-out from a kernel receive buffer on the receive side. On a real NIC the kernel can DMA directly from the sender's pinned pages to the wire and from the wire into the receiver's buffer ring slot; on loopback there is no DMA and the kernel still copies between the two memory regions.
+
+`async_send_zc` requires Linux 6.0+ and a TCP socket (AF_UNIX is not supported). See `examples/stream_recv_multishot.cpp` for the full zero-copy pipeline.
 
 ## Building
 
@@ -289,6 +328,8 @@ Or run the test binary directly with tag filtering:
 ./build/debug/examples/channel_backpressure
 ./build/debug/examples/echo_server_pool
 ./build/debug/examples/echo_to_file
+./build/debug/examples/echo_server_multishot
+./build/debug/examples/stream_recv_multishot
 ```
 
 `parallel_gather` starts 16 producer threads each writing a value into its own
@@ -374,6 +415,24 @@ opens a dedicated log file (`connection_N.log`), writes all received bytes to
 it, then asynchronously closes it. The number of connections is not known
 upfront. From inside the fiber, open, write, and close are three sequential
 statements that each yield the fiber without blocking the OS thread.
+
+`echo_server_multishot` is the multishot-acceptor variant of `echo_server_pool`.
+One `IORING_ACCEPT_MULTISHOT` SQE stays armed in the ring; the kernel delivers
+one CQE per accepted connection without the fiber resubmitting, reducing
+round-trips through the ring compared to a loop of individual `async_accept`
+calls.
+
+`stream_recv_multishot` demonstrates the full zero-copy pipeline: a producer
+fiber sends 10,000 × 64-byte records via `fixed_buffer_pool` + `async_send_zc`;
+a consumer fiber drains the stream with `multishot_recv`. Neither side copies
+data through an intermediate buffer. Output reports total bytes received and
+CQE count — typically fewer CQEs than sends because the kernel batches data into
+buffer slots on the receive side:
+
+```
+stream_recv_multishot: 10000 records × 64 bytes  (buf ring: 256 × 4096)
+received 640000 / 640000 bytes across 9984 CQEs — OK
+```
 
 ## Benchmarks
 
