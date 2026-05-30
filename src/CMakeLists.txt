@@ -1,6 +1,7 @@
 add_library(fiberexec
   fiber_context.cpp
   async_io.cpp
+  fixed_buffer_pool.cpp
   multishot_acceptor.cpp
   multishot_recv.cpp
 )

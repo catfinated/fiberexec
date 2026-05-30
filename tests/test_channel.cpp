@@ -35,7 +35,8 @@ TEST_CASE("value_pop returns the value directly", "[channel]") {
 TEST_CASE("try_push returns full when channel is at capacity", "[channel]") {
     fiberexec::context ctx{2};
     auto sched = ctx.get_scheduler();
-    fiberexec::channel<int> ch{4}; // capacity 4 → stores 3 items
+    // capacity=3: bit_ceil(3+1)=4 internal slots, 4-1=3 usable (exact match).
+    fiberexec::channel<int> ch{3};
 
     stdexec::sync_wait(fiberexec::run(sched, [&] {
         REQUIRE(ch.try_push(1) == fiberexec::channel_op_status::success);

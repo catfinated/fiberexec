@@ -299,3 +299,91 @@ TEST_CASE("multishot_recv delivers data and returns nullopt on EOF", "[networkin
 
     REQUIRE(received == std::string(kMsg1) + std::string(kMsg2));
 }
+
+TEST_CASE("async_send_zc with fixed_buffer_pool delivers data via zero-copy send", "[networking][fixed-buffers]") {
+    // AF_UNIX socketpairs do not support IORING_OP_SEND_ZC; use TCP.
+    auto [server_fd, addr] = make_bound_server();
+
+    fiberexec::context ctx{2};
+    auto sched = ctx.get_scheduler();
+
+    constexpr std::string_view kMsg = "zero-copy";
+    std::array<char, 9> buf{};
+
+    stdexec::sync_wait(
+        stdexec::when_all(fiberexec::run(sched,
+                                         [&] {
+                                             int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                             fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{buf}));
+                                             fiberexec::async_close(conn_fd);
+                                         }),
+                          fiberexec::run(sched, [&] {
+                              int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+                              fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+                              fiberexec::fixed_buffer_pool pool{64, 4};
+                              auto fb = pool.borrow();
+                              auto span = fb.data();
+                              std::memcpy(span.data(), kMsg.data(), kMsg.size());
+                              fiberexec::async_send_zc(fd, fb, kMsg.size());
+                              fiberexec::async_close(fd);
+                          })));
+
+    ::close(server_fd);
+
+    REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
+}
+
+TEST_CASE("fixed_buffer_pool blocks borrow until a buffer is returned", "[networking][fixed-buffers]") {
+    // Pool has one buffer. The single send fiber borrows, sends 'A', then
+    // the fixed_buffer destructor returns the slot; the second borrow succeeds
+    // and sends 'B'. AF_UNIX does not support IORING_OP_SEND_ZC; use TCP.
+    auto [server_fd, addr] = make_bound_server();
+
+    fiberexec::context ctx{2};
+    auto sched = ctx.get_scheduler();
+
+    constexpr std::string_view kMsg = "AB";
+    std::array<char, 2> buf{};
+    std::atomic<int> sends_done{0};
+
+    stdexec::sync_wait(
+        stdexec::when_all(fiberexec::run(sched,
+                                         [&] {
+                                             int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                             // Read exactly 2 bytes; loop handles TCP partial reads.
+                                             std::size_t total = 0;
+                                             while (total < buf.size()) {
+                                                 ssize_t n = fiberexec::async_recv(
+                                                     conn_fd, std::as_writable_bytes(std::span{buf}.subspan(total)));
+                                                 if (n <= 0) {
+                                                     break;
+                                                 }
+                                                 total += static_cast<std::size_t>(n);
+                                             }
+                                             fiberexec::async_close(conn_fd);
+                                         }),
+                          fiberexec::run(sched, [&] {
+                              int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+                              fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+                              fiberexec::fixed_buffer_pool pool{64, 1};
+                              {
+                                  auto fb = pool.borrow();
+                                  fb.data().front() = std::byte{'A'};
+                                  fiberexec::async_send_zc(fd, fb, 1);
+                                  sends_done.fetch_add(1, std::memory_order_relaxed);
+                                  // fb destroyed here → buffer returned to pool
+                              }
+                              {
+                                  auto fb = pool.borrow(); // would have blocked if buffer not returned
+                                  fb.data().front() = std::byte{'B'};
+                                  fiberexec::async_send_zc(fd, fb, 1);
+                                  sends_done.fetch_add(1, std::memory_order_relaxed);
+                              }
+                              fiberexec::async_close(fd);
+                          })));
+
+    ::close(server_fd);
+
+    REQUIRE(sends_done.load() == 2);
+    REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
+}

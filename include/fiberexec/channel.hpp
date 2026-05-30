@@ -2,6 +2,7 @@
 
 #include <boost/fiber/buffered_channel.hpp>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -32,9 +33,13 @@ enum class channel_op_status : std::uint8_t {
 /// @tparam T  Value type.  Must be movable.
 template <class T> class channel {
 public:
-    /// Construct a channel with the given bounded @p capacity (must be > 0).
+    /// Construct a channel that can hold at least @p capacity items without
+    /// blocking.  The internal ring buffer size is bit_ceil(capacity + 1) to
+    /// absorb Boost.Fiber's one-slot reservation (used to distinguish full from
+    /// empty), so the actual limit before push blocks may be slightly larger than
+    /// @p capacity due to power-of-two rounding.
     explicit channel(std::size_t capacity)
-        : ch_(capacity) {}
+        : ch_(std::bit_ceil(capacity + 1)) {}
 
     ~channel() = default;
     channel(channel const&) = delete;

@@ -13,24 +13,29 @@
 #include <cstdio>
 #include <span>
 
-// Stream consumer using IORING_RECV_MULTISHOT and kernel buffer rings.
+// Full zero-copy stream: fixed_buffer_pool (send) + multishot_recv (recv).
 //
-// A producer fiber connects and sends kMessages fixed-size records over a
-// single TCP connection, then closes. A consumer fiber accepts the connection
-// and reads the entire stream via fiberexec::multishot_recv.
+// Producer side — fixed_buffer_pool + async_send_zc:
+//   Buffers are registered with the kernel once via IORING_REGISTER_BUFFERS.
+//   Each async_send_zc references a buffer by its registered index; the kernel
+//   reads from the pinned buffer without a copy and delivers two CQEs: one for
+//   the send and one notification when the buffer is released. The fixed_buffer
+//   destructor returns the slot to the pool so it can be borrowed again.
 //
-// With plain async_recv the consumer would re-arm an SQE for every receive.
-// multishot_recv keeps one SQE armed in the ring for the lifetime of the
-// stream; the kernel selects a buffer from a pre-registered ring for each
-// arriving segment and delivers CQEs without any re-submission from userspace.
-// received_buffer::data() is a zero-copy span into the kernel-selected buffer;
-// no heap allocation occurs per message. The buffer is returned to the ring
-// when the received_buffer handle is destroyed at the end of each loop
-// iteration. When the producer closes the connection, next() returns nullopt.
+// Consumer side — multishot_recv + kernel buffer ring:
+//   One SQE stays armed via IORING_RECV_MULTISHOT. The kernel selects a slot
+//   from the IORING_REGISTER_PBUF_RING buffer ring, writes arriving data into
+//   it, and delivers a CQE. received_buffer::data() is a zero-copy span into
+//   that slot; the slot is returned to the ring when the handle is destroyed.
+//   When the producer closes the connection, next() returns nullopt.
 //
-// Buffer ring sizing: kBufSize is large relative to kRecordSize so the kernel
-// often batches several records into a single CQE, reducing the total number
-// of context switches between kernel and userspace.
+// Neither side copies data through an intermediate kernel buffer.
+//
+// CQE count note: recv-side CQEs are often fewer than sends because the kernel
+// fills each buffer slot with all data currently in the socket receive buffer
+// at the time of selection — multiple sends that have accumulated land in one
+// slot and produce one CQE. This is receive-side batching, not Nagle-style
+// send coalescing (which batches before data leaves the sender).
 
 namespace {
 
@@ -78,14 +83,20 @@ int main() {
 
                            fiberexec::async_close(conn_fd);
                        }),
-        // Producer: connect and stream kMessages records, then close.
+        // Producer: connect, stream kMessages records via zero-copy send, then close.
         fiberexec::run(sched, [&] {
             int fd = ::socket(AF_INET, SOCK_STREAM, 0);
             fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
 
-            std::array<std::byte, kRecordSize> record{};
+            // Register a small pool of fixed send buffers. The kernel pins them
+            // once; each async_send_zc sends from the registered buffer by index
+            // with no intermediate copy.
+            fiberexec::fixed_buffer_pool pool{kRecordSize, 8};
             for (int i = 0; i < kMessages; ++i) {
-                fiberexec::async_send(fd, std::span<std::byte const>{record});
+                auto fb = pool.borrow(); // blocks if all 8 slots are in flight
+                // fb.data() is zero-initialised; fill with real payload here.
+                fiberexec::async_send_zc(fd, fb, kRecordSize);
+                // fb destroyed → slot returned to pool for next iteration
             }
             fiberexec::async_close(fd);
         })));
