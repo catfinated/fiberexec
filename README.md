@@ -15,6 +15,7 @@ io_uring async I/O with fiber ergonomics and P2300 structured concurrency.
   - [channel\<T\> — producer/consumer and accept loops](#channelt--producerconsumer-and-accept-loops)
   - [multishot_recv — streaming zero-copy receive](#multishot_recv--streaming-zero-copy-receive)
   - [fixed_buffer_pool and async_send_zc — zero-copy sends](#fixed_buffer_pool-and-async_send_zc--zero-copy-sends)
+  - [fixed_fd_table and acquire_fd_slot — registered file descriptors](#fixed_fd_table-and-acquire_fd_slot--registered-file-descriptors)
 - [Building](#building)
   - [Prerequisites](#prerequisites)
   - [Configure and build](#configure-and-build)
@@ -262,22 +263,64 @@ while (auto buf = mr.next()) {   // suspends fiber until data or EOF
 
 `fixed_buffer_pool` pre-registers a set of user-space buffers with the kernel once via `IORING_REGISTER_BUFFERS`. Subsequent sends reference them by index rather than pointer, eliminating the per-operation memory pin/unpin that ordinary sends incur. `async_send_zc` submits `IORING_OP_SEND_ZC` with `IORING_RECVSEND_FIXED_BUF`, reading directly from the registered buffer without an intermediate copy.
 
-```cpp
-fiberexec::fixed_buffer_pool pool{/*buf_size=*/64, /*buf_count=*/8};
+The pool is configured as a per-thread singleton via `context_options` and shared by all fibers on the same worker thread. Fibers call `borrow_fixed_buffer()` to obtain an RAII handle.
 
-for (int i = 0; i < kMessages; ++i) {
-    auto fb = pool.borrow();          // suspends fiber if all slots are in flight
-    fill(fb.data(), i);               // write directly into the registered buffer
-    fiberexec::async_send_zc(fd, fb, fb.data().size());
-    // fb destroyed → slot returned to pool, ready for the next borrow
-}
+```cpp
+// Configure 8 × 64-byte slots per worker thread at context construction.
+fiberexec::context ctx{fiberexec::context_options{
+    .thread_count      = 4,
+    .fixed_buffer_size = 64,
+    .fixed_buffer_count = 8,
+}};
+
+// Inside any fiber on this context:
+auto fb = fiberexec::borrow_fixed_buffer(); // suspends fiber if all slots are in flight
+fill(fb.data(), payload);                   // write directly into the registered buffer
+fiberexec::async_send_zc(fd, fb, fb.data().size());
+// fb destroyed → slot returned to pool, ready for the next borrow
 ```
 
-`borrow()` suspends the calling fiber (not the OS thread) when all slots are in flight, providing natural backpressure. `async_send_zc` waits for both the send completion CQE and the kernel's buffer-release notification CQE before returning, ensuring the buffer is safe to reuse. Only one `fixed_buffer_pool` may be active per worker thread at a time (the kernel allows one registered buffer table per ring); constructing a second throws `std::system_error(EBUSY)`.
+`borrow_fixed_buffer()` suspends the calling fiber (not the OS thread) when all slots are in flight, providing natural backpressure. `async_send_zc` waits for both the send completion CQE and the kernel's buffer-release notification CQE before returning, ensuring the buffer is safe to reuse.
 
 Combined with `multishot_recv`, these two primitives eliminate the userspace copy on both ends of a streaming path: no intermediate kernel socket buffer on the send side, and no copy-out from a kernel receive buffer on the receive side. On a real NIC the kernel can DMA directly from the sender's pinned pages to the wire and from the wire into the receiver's buffer ring slot; on loopback there is no DMA and the kernel still copies between the two memory regions.
 
 `async_send_zc` requires Linux 6.0+ and a TCP socket (AF_UNIX is not supported). See `examples/stream_recv_multishot.cpp` for the full zero-copy pipeline.
+
+### `fixed_fd_table` and `acquire_fd_slot` — registered file descriptors
+
+`IORING_REGISTER_FILES` pre-registers a table of file descriptors with the kernel ring. Operations submitted with `IOSQE_FIXED_FILE` look up the fd by slot index rather than going through the process's fd table on every call, shaving a small but consistent amount from each operation's overhead. The benefit is most visible on high-frequency small-write workloads where the fd table lookup is a non-trivial fraction of per-op cost.
+
+Like the buffer pool, the registered-fd table is a per-thread singleton configured at context construction and shared by all fibers on the same worker thread. A fiber calls `acquire_fd_slot(fd)` to install an fd in a slot and get back an `fd_slot` RAII handle. The handle implicitly converts to `fixed_fd`, so it can be passed directly to `async_recv`, `async_send`, `async_read`, `async_write`, and `async_connect`.
+
+```cpp
+fiberexec::context ctx{fiberexec::context_options{
+    .thread_count          = 4,
+    .registered_fd_capacity = 256, // slots per thread
+}};
+
+// Inside any fiber — basic acquire / use / release:
+auto slot = fiberexec::acquire_fd_slot(fd); // installs fd, suspends if table full
+fiberexec::async_recv(slot, buf);           // IOSQE_FIXED_FILE set automatically
+// slot destroyed → kernel slot cleared, index returned to the per-thread free list
+```
+
+`fd_slot::update(new_fd)` swaps the registered fd without releasing the slot. This is the key primitive for workloads where a fiber periodically rotates to a new file or connection — one `io_uring_register_files_update` call per rotation, no slot churn:
+
+```cpp
+// Per-channel fiber writing a partitioned output stream.
+auto slot = fiberexec::acquire_fd_slot(open_next_file());
+while (!done) {
+    fiberexec::async_write(slot, next_record());
+    if (file_size_limit_reached()) {
+        fiberexec::async_close(current_fd);
+        current_fd = open_next_file();
+        slot.update(current_fd);   // reuse same slot — one kernel call, no free-list round-trip
+    }
+}
+// slot destroyed → slot cleared in kernel, index returned to free list
+```
+
+`acquire_fd_slot()` suspends the calling fiber (not the OS thread) when all slots are occupied, providing backpressure when the table is under heavy concurrent use.
 
 ## Building
 
@@ -423,7 +466,7 @@ round-trips through the ring compared to a loop of individual `async_accept`
 calls.
 
 `stream_recv_multishot` demonstrates the full zero-copy pipeline: a producer
-fiber sends 10,000 × 64-byte records via `fixed_buffer_pool` + `async_send_zc`;
+fiber sends 10,000 × 64-byte records via `borrow_fixed_buffer()` + `async_send_zc`;
 a consumer fiber drains the stream with `multishot_recv`. Neither side copies
 data through an intermediate buffer. Output reports total bytes received and
 CQE count — typically fewer CQEs than sends because the kernel batches data into
