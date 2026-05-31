@@ -209,14 +209,16 @@ into `submit_and_wait` so all pending I/O is cancelled before the drain
 completes. The pool now guarantees every started fiber reaches a terminal
 completion before the context destructs.
 
-### Lazy stop-token installation
+### ~~Lazy stop-token installation~~ ✅ done
 
-ADR-0001 notes that `fiber_specific_ptr` incurs a heap allocation per fiber that
-installs a stop token. If the receiver's token is not stoppable (e.g. `sync_wait`
-with no external cancellation source), the `std::stop_source` starts with
-`std::nostopstate` and no stop callback is registered. Verify that this path
-actually skips the `fiber_specific_ptr` heap allocation, or make it do so
-explicitly.
+`install_fiber_stop_token` previously allocated unconditionally via
+`new std::stop_token(...)` even when passed a non-stoppable token (the common
+case when `sync_wait` is used without an external stop source).
+`current_fiber_stop_token()` already returns `std::stop_token{}` when the
+fiber-local pointer is null — behaviorally identical to a non-stoppable token —
+so the fix was a one-line guard: `if (!tok.stop_possible()) return;` at the top
+of `install_fiber_stop_token`. Fibers launched without a stoppable receiver now
+incur no heap allocation for stop-token machinery.
 
 ### Thread pool sizing
 
@@ -241,12 +243,20 @@ Shutdown is coordinated server-side: the last test client calls
 the accept loop catches the error, closes the channel, and the worker pool
 drains and exits cleanly.
 
-### `async_read` / `async_write` vs `async_recv` / `async_send`
+### ~~`async_read` / `async_write` vs `async_recv` / `async_send`~~ — won't do / documented
 
-Currently both sets exist. The distinction (`read`/`write` work on any fd;
-`recv`/`send` are socket-specific and carry flags) is standard POSIX, but it is
-worth documenting clearly and deciding if fiberexec should expose the flags
-parameter on `recv`/`send`.
+Both sets are intentionally kept. The distinction follows POSIX:
+
+- `async_read` / `async_write` — work on any file descriptor (files, pipes,
+  sockets). No flags parameter; maps directly to `IORING_OP_READ` /
+  `IORING_OP_WRITE`.
+- `async_recv` / `async_send` — socket-specific. Expose a `flags` parameter
+  passed through to the underlying recv/send (e.g. `MSG_WAITALL`, `MSG_NOSIGNAL`,
+  `MSG_PEEK`). Maps to `IORING_OP_RECV` / `IORING_OP_SEND`.
+
+This item was written when `async_recv`/`async_send` had no flags parameter and
+were therefore redundant with `async_read`/`async_write`. The flags parameter
+has since been added, making the distinction both correct and necessary.
 
 ### ~~`std::expected`-based error API~~ — won't do
 

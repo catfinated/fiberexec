@@ -16,6 +16,7 @@ io_uring async I/O with fiber ergonomics and P2300 structured concurrency.
   - [multishot_recv — streaming zero-copy receive](#multishot_recv--streaming-zero-copy-receive)
   - [fixed_buffer_pool and async_send_zc — zero-copy sends](#fixed_buffer_pool-and-async_send_zc--zero-copy-sends)
   - [fixed_fd_table and acquire_fd_slot — registered file descriptors](#fixed_fd_table-and-acquire_fd_slot--registered-file-descriptors)
+  - [async_send_recv and async_write_fsync — linked SQE pairs](#async_send_recv-and-async_write_fsync--linked-sqe-pairs)
 - [Building](#building)
   - [Prerequisites](#prerequisites)
   - [Configure and build](#configure-and-build)
@@ -322,6 +323,32 @@ while (!done) {
 
 `acquire_fd_slot()` suspends the calling fiber (not the OS thread) when all slots are occupied, providing backpressure when the table is under heavy concurrent use.
 
+### `async_send_recv` and `async_write_fsync` — linked SQE pairs
+
+`IOSQE_IO_LINK` lets the kernel execute a chain of SQEs sequentially without a userspace round-trip between them. fiberexec exposes this as two paired operations:
+
+- **`async_send_recv(fd, send_buf, recv_buf)`** — submits a send immediately followed by a recv as a linked pair. One `io_uring_submit` call, one fiber suspension. The kernel starts the recv the instant the send completes, with no scheduler involvement in between. Returns `std::pair<ssize_t, ssize_t>` (bytes sent, bytes received).
+- **`async_write_fsync(fd, buf)`** — submits a write immediately followed by an fsync as a linked pair. The fsync starts the instant the write completes. Returns the byte count of the write.
+
+```cpp
+fiberexec::run(sched, [&] {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    fiberexec::async_connect(fd, addr, addrlen);
+
+    // Send "ping", receive "pong" — one submission, one suspension.
+    auto [sent, recvd] = fiberexec::async_send_recv(
+        fd,
+        std::as_bytes(std::span{"ping", 4}),
+        std::as_writable_bytes(std::span{buf}));
+
+    fiberexec::async_close(fd);
+});
+```
+
+Both operations are fully cancellation-aware: if either the pool-wide or fiber-local stop token fires while the fiber is suspended, all awaitables in the chain are cancelled. The kernel cascades `ECANCELED` to any not-yet-started linked SQE automatically.
+
+Both `async_send_recv` and `async_write_fsync` accept `fd_ref` parameters, so they work with both raw file descriptors and pre-registered slots from `fixed_fd_table` without needing separate overloads.
+
 ## Building
 
 ### Prerequisites
@@ -522,7 +549,7 @@ This is a research project and learning exercise. It is not production-ready.
 
 | Dependency    | Managed by   | Version | Purpose                           |
 |---------------|--------------|---------|-----------------------------------|
-| stdexec       | FetchContent | `main`  | P2300 reference implementation    |
+| stdexec       | FetchContent | `02d671d` | P2300 reference implementation  |
 | Boost.Fiber   | vcpkg        | 1.84+   | Cooperative fiber runtime         |
 | Boost.Context | vcpkg        | 1.84+   | Low-level context switching       |
 | Boost.Asio    | vcpkg        | 1.84+   | Asio benchmarks (`bench_echo`)    |

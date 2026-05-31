@@ -348,6 +348,9 @@ fixed_buffer_pool* current_fixed_buffer_pool() noexcept { return tl_fixed_buffer
 fixed_fd_table* current_fd_table() noexcept { return tl_fixed_fd_table; }
 
 void install_fiber_stop_token(std::stop_token tok) {
+    if (!tok.stop_possible()) {
+        return; // non-stoppable token — leave fiber_stop_token null, skip heap allocation
+    }
     // fiber_specific_ptr takes ownership of the raw pointer and deletes it
     // when the fiber exits. NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     fiber_stop_token.reset(new std::stop_token(std::move(tok)));
