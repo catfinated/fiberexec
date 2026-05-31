@@ -300,11 +300,15 @@ TEST_CASE("multishot_recv delivers data and returns nullopt on EOF", "[networkin
     REQUIRE(received == std::string(kMsg1) + std::string(kMsg2));
 }
 
-TEST_CASE("async_send_zc with fixed_buffer_pool delivers data via zero-copy send", "[networking][fixed-buffers]") {
+TEST_CASE("borrow_fixed_buffer delivers data via zero-copy send", "[networking][fixed-buffers]") {
     // AF_UNIX socketpairs do not support IORING_OP_SEND_ZC; use TCP.
     auto [server_fd, addr] = make_bound_server();
 
-    fiberexec::context ctx{2};
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 2,
+        .fixed_buffer_size = 64,
+        .fixed_buffer_count = 4,
+    }};
     auto sched = ctx.get_scheduler();
 
     constexpr std::string_view kMsg = "zero-copy";
@@ -320,10 +324,8 @@ TEST_CASE("async_send_zc with fixed_buffer_pool delivers data via zero-copy send
                           fiberexec::run(sched, [&] {
                               int fd = ::socket(AF_INET, SOCK_STREAM, 0);
                               fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
-                              fiberexec::fixed_buffer_pool pool{64, 4};
-                              auto fb = pool.borrow();
-                              auto span = fb.data();
-                              std::memcpy(span.data(), kMsg.data(), kMsg.size());
+                              auto fb = fiberexec::borrow_fixed_buffer();
+                              std::memcpy(fb.data().data(), kMsg.data(), kMsg.size());
                               fiberexec::async_send_zc(fd, fb, kMsg.size());
                               fiberexec::async_close(fd);
                           })));
@@ -333,13 +335,18 @@ TEST_CASE("async_send_zc with fixed_buffer_pool delivers data via zero-copy send
     REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
 }
 
-TEST_CASE("fixed_buffer_pool blocks borrow until a buffer is returned", "[networking][fixed-buffers]") {
-    // Pool has one buffer. The single send fiber borrows, sends 'A', then
+TEST_CASE("borrow_fixed_buffer blocks until a buffer is returned", "[networking][fixed-buffers]") {
+    // Pool has one buffer per thread. The send fiber borrows, sends 'A', then
     // the fixed_buffer destructor returns the slot; the second borrow succeeds
     // and sends 'B'. AF_UNIX does not support IORING_OP_SEND_ZC; use TCP.
     auto [server_fd, addr] = make_bound_server();
 
-    fiberexec::context ctx{2};
+    // Single thread so both fibers share the same pool with one slot.
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 1,
+        .fixed_buffer_size = 64,
+        .fixed_buffer_count = 1,
+    }};
     auto sched = ctx.get_scheduler();
 
     constexpr std::string_view kMsg = "AB";
@@ -365,16 +372,15 @@ TEST_CASE("fixed_buffer_pool blocks borrow until a buffer is returned", "[networ
                           fiberexec::run(sched, [&] {
                               int fd = ::socket(AF_INET, SOCK_STREAM, 0);
                               fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
-                              fiberexec::fixed_buffer_pool pool{64, 1};
                               {
-                                  auto fb = pool.borrow();
+                                  auto fb = fiberexec::borrow_fixed_buffer();
                                   fb.data().front() = std::byte{'A'};
                                   fiberexec::async_send_zc(fd, fb, 1);
                                   sends_done.fetch_add(1, std::memory_order_relaxed);
                                   // fb destroyed here → buffer returned to pool
                               }
                               {
-                                  auto fb = pool.borrow(); // would have blocked if buffer not returned
+                                  auto fb = fiberexec::borrow_fixed_buffer(); // blocks if pool exhausted
                                   fb.data().front() = std::byte{'B'};
                                   fiberexec::async_send_zc(fd, fb, 1);
                                   sends_done.fetch_add(1, std::memory_order_relaxed);
@@ -386,4 +392,120 @@ TEST_CASE("fixed_buffer_pool blocks borrow until a buffer is returned", "[networ
 
     REQUIRE(sends_done.load() == 2);
     REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
+}
+
+TEST_CASE("acquire_fd_slot: async_recv via registered fd", "[networking][fixed-fd]") {
+    // Server acquires a slot for the accepted fd and reads via async_recv(fixed_fd).
+    auto [server_fd, addr] = make_bound_server();
+
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 2,
+        .registered_fd_capacity = 4,
+    }};
+    auto sched = ctx.get_scheduler();
+
+    constexpr std::string_view kMsg = "fixed-recv";
+    std::array<char, 10> buf{};
+
+    stdexec::sync_wait(
+        stdexec::when_all(fiberexec::run(sched,
+                                         [&] {
+                                             int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                                             auto slot = fiberexec::acquire_fd_slot(conn_fd);
+                                             fiberexec::async_recv(slot, std::as_writable_bytes(std::span{buf}));
+                                             fiberexec::async_close(conn_fd);
+                                             // slot destroyed → clears kernel slot, returns to free list
+                                         }),
+                          fiberexec::run(sched, [&] {
+                              int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+                              fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+                              fiberexec::async_send(fd, std::as_bytes(std::span<char const>{kMsg.data(), kMsg.size()}));
+                              fiberexec::async_close(fd);
+                          })));
+
+    ::close(server_fd);
+
+    REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
+}
+
+TEST_CASE("acquire_fd_slot: async_send via registered fd", "[networking][fixed-fd]") {
+    // Client acquires a slot for its socket and sends via async_send(fixed_fd).
+    auto [server_fd, addr] = make_bound_server();
+
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 2,
+        .registered_fd_capacity = 4,
+    }};
+    auto sched = ctx.get_scheduler();
+
+    constexpr std::string_view kMsg = "fixed-send";
+    std::array<char, 10> buf{};
+
+    stdexec::sync_wait(stdexec::when_all(
+        fiberexec::run(sched,
+                       [&] {
+                           int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                           fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{buf}));
+                           fiberexec::async_close(conn_fd);
+                       }),
+        fiberexec::run(sched, [&] {
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+            auto slot = fiberexec::acquire_fd_slot(fd);
+            fiberexec::async_send(slot, std::as_bytes(std::span<char const>{kMsg.data(), kMsg.size()}));
+            fiberexec::async_close(fd);
+        })));
+
+    ::close(server_fd);
+
+    REQUIRE(std::string_view(buf.data(), kMsg.size()) == kMsg);
+}
+
+TEST_CASE("acquire_fd_slot: update slot on fd rotation", "[networking][fixed-fd]") {
+    // Fiber acquires one slot, sends 'A', then updates the slot to a new fd and sends 'B'.
+    // Demonstrates the file-rotation pattern without releasing the slot between sends.
+    auto [server_fd, addr] = make_bound_server(4);
+
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 2,
+        .registered_fd_capacity = 4,
+    }};
+    auto sched = ctx.get_scheduler();
+
+    // Server accepts two connections and reads one byte from each.
+    std::array<char, 2> received{};
+    stdexec::sync_wait(stdexec::when_all(
+        fiberexec::run(sched,
+                       [&] {
+                           for (int i = 0; i < 2; ++i) {
+                               int conn_fd = fiberexec::async_accept(server_fd, nullptr, nullptr);
+                               char c{};
+                               fiberexec::async_recv(conn_fd, std::as_writable_bytes(std::span{&c, 1}));
+                               // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+                               received.at(static_cast<std::size_t>(i)) = c;
+                               fiberexec::async_close(conn_fd);
+                           }
+                       }),
+        fiberexec::run(sched, [&] {
+            // First fd: connect, acquire slot, send 'A'.
+            int fd1 = ::socket(AF_INET, SOCK_STREAM, 0);
+            fiberexec::async_connect(fd1, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+            auto slot = fiberexec::acquire_fd_slot(fd1);
+            constexpr char kA = 'A';
+            fiberexec::async_send(slot, std::as_bytes(std::span{&kA, 1}));
+            fiberexec::async_close(fd1);
+
+            // Second fd: connect, update the same slot, send 'B' — no slot churn.
+            int fd2 = ::socket(AF_INET, SOCK_STREAM, 0);
+            fiberexec::async_connect(fd2, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
+            slot.update(fd2);
+            constexpr char kB = 'B';
+            fiberexec::async_send(slot, std::as_bytes(std::span{&kB, 1}));
+            fiberexec::async_close(fd2);
+        })));
+
+    ::close(server_fd);
+
+    REQUIRE(received.at(0) == 'A');
+    REQUIRE(received.at(1) == 'B');
 }

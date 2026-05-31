@@ -131,10 +131,22 @@ memory mapping.
 `IORING_RECVSEND_FIXED_BUF`, eliminating the per-op memory pin/unpin on the
 send side. See ADR-0004.
 
-### Fixed file descriptors (`io_uring_register_files`)
+### ~~Fixed file descriptors (`io_uring_register_files`)~~ ✅ done
 
-Registered fds skip the per-op fd table lookup in the kernel. For a server that
-holds a large, stable set of open connections this is a measurable win.
+Implemented as `fiberexec::fixed_fd_table` and `fiberexec::fd_slot`
+(`include/fiberexec/fixed_fd_table.hpp`, `src/fixed_fd_table.cpp`). The table
+is a per-thread singleton configured via `context_options::registered_fd_capacity`;
+fibers call `acquire_fd_slot(fd)` to borrow a slot, then pass the returned
+`fd_slot` directly to `async_recv` / `async_send` / `async_read` / `async_write`
+/ `async_connect` (implicit conversion to `fixed_fd` sets `IOSQE_FIXED_FILE` on
+each SQE). `fd_slot::update(new_fd)` swaps the registered fd without releasing
+the slot — the key primitive for the file-rotation pattern where a fiber
+periodically closes its current output file and opens the next one. Slots are
+returned to the per-thread free list on `fd_slot` destruction.
+
+The design and the decision to scope both `fixed_fd_table` and `fixed_buffer_pool`
+as thread-local singletons (rather than fiber-scoped objects) are documented in
+ADR-0005.
 
 ### Linked SQEs (`IOSQE_IO_LINK`)
 

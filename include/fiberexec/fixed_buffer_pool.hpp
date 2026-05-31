@@ -78,6 +78,15 @@ private:
     channel<uint16_t> free_list_;
 };
 
+/// Borrow one fixed buffer from the calling thread's per-thread pool.
+///
+/// The pool must have been enabled via `context_options::fixed_buffer_size` /
+/// `fixed_buffer_count` before the `context` was constructed.  Suspends the
+/// calling fiber if all buffers are currently in use.
+///
+/// @throws std::runtime_error if no fixed-buffer pool was configured for this thread.
+[[nodiscard]] fixed_buffer_pool::fixed_buffer borrow_fixed_buffer();
+
 /// Zero-copy send using a pre-registered fixed buffer.
 ///
 /// Submits IORING_OP_SEND_ZC with IORING_RECVSEND_FIXED_BUF, referencing buf
@@ -85,8 +94,8 @@ private:
 /// CQE and the kernel's buffer-release notification CQE arrive.  The kernel
 /// reads directly from the registered buffer with no intermediate copy.
 ///
-/// buf must have been borrowed from a fixed_buffer_pool constructed on the
-/// same worker thread.  Returns the number of bytes sent.
+/// buf must have been borrowed from the thread-local fixed_buffer_pool (via
+/// `borrow_fixed_buffer()`).  Returns the number of bytes sent.
 ssize_t async_send_zc(int fd, fixed_buffer_pool::fixed_buffer const& buf, std::size_t nbytes, int flags = 0);
 
 } // namespace fiberexec

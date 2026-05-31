@@ -56,7 +56,11 @@ int main() {
     std::printf("stream_recv_multishot: %d records × %zu bytes  (buf ring: %zu × %zu)\n", kMessages, kRecordSize,
                 kBufCount, kBufSize);
 
-    fiberexec::context ctx{2};
+    fiberexec::context ctx{fiberexec::context_options{
+        .thread_count = 2,
+        .fixed_buffer_size = kRecordSize,
+        .fixed_buffer_count = 8,
+    }};
     auto sched = ctx.get_scheduler();
 
     std::atomic<std::size_t> total_bytes{0};
@@ -88,12 +92,10 @@ int main() {
             int fd = ::socket(AF_INET, SOCK_STREAM, 0);
             fiberexec::async_connect(fd, reinterpret_cast<sockaddr const*>(&addr), sizeof(addr));
 
-            // Register a small pool of fixed send buffers. The kernel pins them
-            // once; each async_send_zc sends from the registered buffer by index
-            // with no intermediate copy.
-            fiberexec::fixed_buffer_pool pool{kRecordSize, 8};
             for (int i = 0; i < kMessages; ++i) {
-                auto fb = pool.borrow(); // blocks if all 8 slots are in flight
+                // borrow_fixed_buffer() draws from the thread-local pool
+                // configured in context_options; blocks if all 8 slots are in flight.
+                auto fb = fiberexec::borrow_fixed_buffer();
                 // fb.data() is zero-initialised; fill with real payload here.
                 fiberexec::async_send_zc(fd, fb, kRecordSize);
                 // fb destroyed → slot returned to pool for next iteration

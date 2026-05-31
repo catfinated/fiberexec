@@ -1,49 +1,19 @@
 #include <fiberexec/async_io.hpp>
-#include <fiberexec/detail/fiber_ops.hpp>
+#include <fiberexec/detail/async_helpers.hpp>
 
 #include <liburing.h>
 
-#include <cerrno>
 #include <chrono>
 #include <optional>
 #include <span>
-#include <stdexcept>
 #include <system_error>
 
 namespace fiberexec {
 
-namespace {
-
-// Validate fiber context and check for pre-cancellation via the fiber-local
-// stop token.  Returns the current thread's ring so the caller can acquire an
-// SQE at the right point.
-io_uring* begin_async_op(char const* caller) {
-    io_uring* ring = detail::current_ring();
-    if (ring == nullptr) {
-        throw std::runtime_error(std::string(caller) + " called outside of a fiberexec fiber");
-    }
-    auto st = detail::current_fiber_stop_token();
-    if (st.stop_requested()) {
-        throw std::system_error(ECANCELED, std::system_category(), caller);
-    }
-    return ring;
-}
-
-// Dispatch to submit_and_wait or submit_and_wait_with_timeout depending on
-// whether a timeout was provided.
-int dispatch(io_uring_sqe* sqe, std::optional<std::chrono::nanoseconds> const& timeout) {
-    if (timeout) {
-        return detail::submit_and_wait_with_timeout(sqe, *timeout);
-    }
-    return detail::submit_and_wait(sqe);
-}
-
-} // namespace
-
 ssize_t async_read(int fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_read"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_read"));
     io_uring_prep_read(sqe, fd, buf.data(), static_cast<unsigned>(buf.size()), 0);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_read");
     }
@@ -51,9 +21,9 @@ ssize_t async_read(int fd, std::span<std::byte> buf, std::optional<std::chrono::
 }
 
 ssize_t async_write(int fd, std::span<std::byte const> buf, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_write"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_write"));
     io_uring_prep_write(sqe, fd, buf.data(), static_cast<unsigned>(buf.size()), 0);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_write");
     }
@@ -61,9 +31,9 @@ ssize_t async_write(int fd, std::span<std::byte const> buf, std::optional<std::c
 }
 
 int async_accept(int fd, sockaddr* addr, socklen_t* addrlen, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_accept"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_accept"));
     io_uring_prep_accept(sqe, fd, addr, addrlen, 0);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_accept");
     }
@@ -71,9 +41,9 @@ int async_accept(int fd, sockaddr* addr, socklen_t* addrlen, std::optional<std::
 }
 
 int async_openat(int dirfd, char const* path, int flags, mode_t mode, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_openat"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_openat"));
     io_uring_prep_openat(sqe, dirfd, path, flags, mode);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_openat");
     }
@@ -94,20 +64,20 @@ void async_close(int fd) {
 }
 
 void async_connect(int fd, sockaddr const* addr, socklen_t addrlen, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_connect"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_connect"));
     // io_uring_prep_connect takes a non-const addr; the kernel does not modify it.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
     io_uring_prep_connect(sqe, fd, const_cast<sockaddr*>(addr), addrlen);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_connect");
     }
 }
 
 ssize_t async_recv(int fd, std::span<std::byte> buf, int flags, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_recv"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_recv"));
     io_uring_prep_recv(sqe, fd, buf.data(), buf.size(), flags);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_recv");
     }
@@ -115,10 +85,10 @@ ssize_t async_recv(int fd, std::span<std::byte> buf, int flags, std::optional<st
 }
 
 ssize_t async_send(int fd, std::span<std::byte const> buf, int flags, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(begin_async_op("async_send"));
+    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_send"));
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
     io_uring_prep_send(sqe, fd, const_cast<void*>(static_cast<void const*>(buf.data())), buf.size(), flags);
-    int const res = dispatch(sqe, timeout);
+    int const res = detail::dispatch(sqe, timeout);
     if (res < 0) {
         throw std::system_error(-res, std::system_category(), "async_send");
     }
@@ -126,7 +96,7 @@ ssize_t async_send(int fd, std::span<std::byte const> buf, int flags, std::optio
 }
 
 void async_sleep_for(std::chrono::nanoseconds duration) {
-    io_uring* ring = begin_async_op("async_sleep_for");
+    io_uring* ring = detail::begin_async_op("async_sleep_for");
     if (duration.count() <= 0) {
         return;
     }

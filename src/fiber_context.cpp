@@ -1,6 +1,8 @@
 #include <fiberexec/context.hpp>
 
 #include <fiberexec/detail/cqe_handler.hpp>
+#include <fiberexec/fixed_buffer_pool.hpp>
+#include <fiberexec/fixed_fd_table.hpp>
 
 #include <boost/fiber/all.hpp>
 #include <liburing.h>
@@ -23,13 +25,15 @@ namespace {
 
 class io_uring_scheduler; // forward declaration for tl_scheduler
 
-thread_local io_uring* tl_ring = nullptr;                // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-thread_local io_uring_scheduler* tl_scheduler = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
+// NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
+thread_local io_uring* tl_ring = nullptr;
+thread_local io_uring_scheduler* tl_scheduler = nullptr;
+thread_local fixed_buffer_pool* tl_fixed_buffer_pool = nullptr;
+thread_local fixed_fd_table* tl_fixed_fd_table = nullptr;
 // Per-fiber stop token. fiber_specific_ptr gives each Boost.Fiber its own
 // slot; thread_local would be wrong because multiple fibers share a thread.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 boost::fibers::fiber_specific_ptr<std::stop_token> fiber_stop_token;
+// NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Parked on the suspended fiber's stack; pointer (upcast to cqe_handler*)
 // lives in sqe->user_data. complete() delivers the CQE result to the fiber.
@@ -54,15 +58,15 @@ constexpr uint64_t k_cancel_tag = 2;
 // ---------------------------------------------------------------------------
 class fiber_pool {
 public:
-    explicit fiber_pool(std::uint32_t thread_count, std::size_t stack_size)
+    explicit fiber_pool(context_options const& opts)
         : running_{true}
-        , stack_size_{stack_size}
+        , opts_{opts}
         , eventfd_{::eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)} {
         if (eventfd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd");
         }
-        threads_.reserve(thread_count);
-        for (std::uint32_t i = 0; i < thread_count; ++i) {
+        threads_.reserve(opts_.thread_count);
+        for (std::uint32_t i = 0; i < opts_.thread_count; ++i) {
             threads_.emplace_back([this] { worker(); });
         }
     }
@@ -108,7 +112,7 @@ private:
     boost::fibers::condition_variable shutdown_cv_;
     boost::fibers::mutex shutdown_mtx_;
     std::atomic<bool> running_;
-    std::size_t stack_size_;
+    context_options opts_;
     int eventfd_;
     std::atomic<std::size_t> in_flight_{0};
     std::stop_source pool_stop_source_;
@@ -270,7 +274,8 @@ private:
                 pool->shutdown_cv_.notify_all();
             }
         };
-        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{pool_->stack_size_}, std::move(tracked))
+        boost::fibers::fiber(std::allocator_arg, boost::fibers::fixedsize_stack{pool_->opts_.stack_size},
+                             std::move(tracked))
             .detach();
     }
 
@@ -337,6 +342,8 @@ private:
 namespace detail {
 
 io_uring* current_ring() noexcept { return tl_ring; }
+fixed_buffer_pool* current_fixed_buffer_pool() noexcept { return tl_fixed_buffer_pool; }
+fixed_fd_table* current_fd_table() noexcept { return tl_fixed_fd_table; }
 
 void install_fiber_stop_token(std::stop_token tok) {
     // fiber_specific_ptr takes ownership of the raw pointer and deletes it
@@ -423,6 +430,23 @@ void schedule_task(fiber_pool& pool, task work) noexcept { pool.post(std::move(w
 void fiber_pool::worker() {
     boost::fibers::use_scheduling_algorithm<io_uring_scheduler>(this);
 
+    // After use_scheduling_algorithm the ring is live (tl_ring is set).
+    // Initialise per-thread kernel resources so all fibers on this thread can
+    // share them.  Stack locals are destroyed when worker() returns, which is
+    // before thread-local cleanup tears down the io_uring_scheduler and
+    // clears tl_ring — so unregister_buffers / unregister_files see a live ring.
+    std::optional<fixed_buffer_pool> fbp;
+    std::optional<fixed_fd_table> fdt;
+
+    if (opts_.fixed_buffer_size > 0 && opts_.fixed_buffer_count > 0) {
+        fbp.emplace(opts_.fixed_buffer_size, opts_.fixed_buffer_count);
+        tl_fixed_buffer_pool = &*fbp;
+    }
+    if (opts_.registered_fd_capacity > 0) {
+        fdt.emplace(opts_.registered_fd_capacity);
+        tl_fixed_fd_table = &*fdt;
+    }
+
     // Park the main fiber here. The scheduler's suspend_until() drives all
     // io_uring and fiber dispatch. stop() notifies the CV to unblock us.
     // We also wait for all in-flight fibers to drain before exiting.
@@ -430,14 +454,21 @@ void fiber_pool::worker() {
     shutdown_cv_.wait(lk, [this] {
         return !running_.load(std::memory_order_relaxed) && in_flight_.load(std::memory_order_acquire) == 0;
     });
+
+    // Null out the thread-local pointers before the optionals are destroyed.
+    tl_fixed_buffer_pool = nullptr;
+    tl_fixed_fd_table = nullptr;
 }
 
 // ---------------------------------------------------------------------------
 // context
 // ---------------------------------------------------------------------------
 
+context::context(context_options const& opts)
+    : pool_(std::make_unique<fiber_pool>(opts)) {}
+
 context::context(std::uint32_t thread_count, std::size_t stack_size)
-    : pool_(std::make_unique<fiber_pool>(thread_count, stack_size)) {}
+    : context(context_options{.thread_count = thread_count, .stack_size = stack_size}) {}
 
 context::~context() = default;
 

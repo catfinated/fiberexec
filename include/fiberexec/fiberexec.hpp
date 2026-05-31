@@ -11,6 +11,7 @@
 #include <fiberexec/channel.hpp>
 #include <fiberexec/context.hpp>
 #include <fiberexec/fixed_buffer_pool.hpp>
+#include <fiberexec/fixed_fd_table.hpp>
 #include <fiberexec/multishot_acceptor.hpp>
 #include <fiberexec/multishot_recv.hpp>
 #include <fiberexec/run.hpp>

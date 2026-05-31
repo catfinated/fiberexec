@@ -12,6 +12,8 @@ struct io_uring_sqe; // NOLINT(bugprone-reserved-identifier)
 namespace fiberexec {
 
 class fiber_pool;
+class fixed_buffer_pool;
+class fixed_fd_table;
 
 namespace detail {
 
@@ -54,6 +56,14 @@ void install_fiber_stop_token(std::stop_token tok);
 /// @p handler, tagged so drain_cqes() silently discards the cancel CQE.
 /// No-op if the calling thread has no ring (e.g. called from outside a worker).
 void submit_cancel(void* handler) noexcept;
+
+/// Return the fixed_buffer_pool for the current worker thread, or nullptr if
+/// no pool was configured (context_options::fixed_buffer_size was 0).
+[[nodiscard]] fixed_buffer_pool* current_fixed_buffer_pool() noexcept;
+
+/// Return the fixed_fd_table for the current worker thread, or nullptr if no
+/// table was configured (context_options::registered_fd_capacity was 0).
+[[nodiscard]] fixed_fd_table* current_fd_table() noexcept;
 
 } // namespace detail
 

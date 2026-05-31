@@ -12,6 +12,32 @@
 
 namespace fiberexec {
 
+/// Default fiber stack size — matches `boost::context::stack_traits::default_size()` (128 KiB).
+inline constexpr std::size_t default_stack_size = 128UL * 1024UL;
+
+/// Configuration options for constructing a fiberexec context.
+///
+/// Pass to `context(context_options)` to enable per-thread kernel resources
+/// (fixed-buffer pool, registered-fd table) that all fibers on a thread share.
+struct context_options {
+    /// Number of OS threads to spin up.
+    std::uint32_t thread_count = static_cast<std::uint32_t>(std::thread::hardware_concurrency());
+
+    /// Stack size in bytes for each spawned fiber.
+    std::size_t stack_size = default_stack_size;
+
+    /// Per-thread fixed-buffer pool.  Both must be non-zero to enable.
+    /// When enabled, fibers call `borrow_fixed_buffer()` to obtain an RAII
+    /// handle into the registered buffer.
+    std::size_t fixed_buffer_size = 0;  ///< Size of each fixed buffer in bytes.
+    std::size_t fixed_buffer_count = 0; ///< Number of fixed buffers per thread.
+
+    /// Per-thread registered-fd table capacity.  Zero disables the feature.
+    /// When enabled, fibers call `acquire_fd_slot(fd)` to get an RAII slot
+    /// that references a pre-registered file descriptor.
+    std::size_t registered_fd_capacity = 0;
+};
+
 /// Execution context that owns a thread pool of Boost.Fiber workers backed
 /// by io_uring.
 ///
@@ -30,18 +56,22 @@ namespace fiberexec {
 /// @see scheduler
 class context {
 public:
-    /// Default fiber stack size — matches `boost::context::stack_traits::default_size()` (128 KiB).
-    static constexpr std::size_t default_stack_size = 128UL * 1024UL;
+    /// Alias kept for backward compatibility; prefer `fiberexec::default_stack_size`.
+    static constexpr std::size_t default_stack_size =
+        fiberexec::default_stack_size; // NOLINT(misc-redundant-expression)
 
-    /// Construct the context and start @p thread_count worker threads.
+    /// Construct the context from a `context_options` struct.
     ///
-    /// Defaults to `std::thread::hardware_concurrency()` when omitted.
-    ///
-    /// @param thread_count Number of OS threads to spin up.
-    /// @param stack_size   Stack size in bytes for each spawned fiber.
-    ///                     Defaults to `default_stack_size` (128 KiB).
-    explicit context(std::uint32_t thread_count = std::thread::hardware_concurrency(),
-                     std::size_t stack_size = default_stack_size);
+    /// Set `opts.fixed_buffer_size` / `opts.fixed_buffer_count` and/or
+    /// `opts.registered_fd_capacity` to enable per-thread kernel resources
+    /// accessible via `borrow_fixed_buffer()` and `acquire_fd_slot()`.
+    explicit context(context_options const& opts = {});
+
+    /// Convenience constructor — equivalent to `context_options{.thread_count = thread_count,
+    /// .stack_size = stack_size}`.  Provided for backward compatibility with call sites
+    /// that do not need fixed buffers or registered fds.
+    explicit context(std::uint32_t thread_count,
+                     std::size_t stack_size = fiberexec::default_stack_size); // NOLINT(misc-redundant-expression)
 
     /// Drain all in-flight fibers and join every worker thread.
     ~context();

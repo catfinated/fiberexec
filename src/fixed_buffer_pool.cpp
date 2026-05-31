@@ -1,5 +1,6 @@
 #include <fiberexec/fixed_buffer_pool.hpp>
 
+#include <fiberexec/detail/cqe_handler.hpp>
 #include <fiberexec/detail/fiber_ops.hpp>
 
 #include <boost/fiber/future/promise.hpp>
@@ -112,7 +113,7 @@ fixed_buffer_pool::fixed_buffer_pool(std::size_t buf_size, std::size_t buf_count
         throw std::invalid_argument("fixed_buffer_pool: buf_size and buf_count must be non-zero");
     }
     if (ring_ == nullptr) {
-        throw std::runtime_error("fixed_buffer_pool constructed outside of a fiberexec fiber");
+        throw std::runtime_error("fixed_buffer_pool constructed outside of a fiberexec worker thread");
     }
 
     std::vector<iovec> iovecs(buf_count_);
@@ -177,6 +178,15 @@ ssize_t async_send_zc(int fd, fixed_buffer_pool::fixed_buffer const& buf, std::s
         throw std::system_error(-result, std::system_category(), "async_send_zc");
     }
     return static_cast<ssize_t>(result);
+}
+
+fixed_buffer_pool::fixed_buffer borrow_fixed_buffer() {
+    fixed_buffer_pool* pool = detail::current_fixed_buffer_pool();
+    if (pool == nullptr) {
+        throw std::runtime_error(
+            "borrow_fixed_buffer called without fixed_buffer_size/fixed_buffer_count configured in context_options");
+    }
+    return pool->borrow();
 }
 
 } // namespace fiberexec
