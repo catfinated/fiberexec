@@ -1,7 +1,30 @@
 #pragma once
 
+// =============================================================================
+// STDEXEC INTERNAL DEPENDENCY — read before updating stdexec
+// =============================================================================
+// fiber_domain::transform_sender intercepts bulk_chunked_t senders and fans
+// them out across fibers.  stdexec provides no public API for sender
+// decomposition, so two internal layout assumptions are unavoidable:
+//
+//   1. A bulk_chunked_t sender structured-binds as (tag, data, child).
+//      Used in: auto& [tag, data, child] = sndr;
+//
+//   2. The bulk data structured-binds as (policy, shape, fn).
+//      Used in: auto [pol, shape, fun] = std::move(data);
+//
+// These are verified against stdexec commit 02d671d (2026-05-31).
+// cmake/Dependencies.cmake pins stdexec to that commit.  When advancing the
+// pin, re-check these two decompositions compile and produce correct results.
+//
+// exec::sender_for (from <exec/sender_for.hpp>) is the stdexec-blessed public
+// replacement for the internal stdexec::__sender_for concept.  It still
+// transitively includes __sender_introspection.hpp, but through a non-internal
+// header path that is less likely to vanish on a stdexec update.
+// =============================================================================
+
+#include <exec/sender_for.hpp>
 #include <fiberexec/detail/fiber_ops.hpp>
-#include <stdexec/__detail/__sender_introspection.hpp>
 #include <stdexec/execution.hpp>
 
 #include <atomic>
@@ -132,7 +155,7 @@ template <class Shape, class Fun, class PredSender> struct fiber_bulk_sender {
 // Inherits default_domain to pass all other algorithms through unchanged.
 struct fiber_domain : stdexec::default_domain {
     template <class Sender, class Env>
-        requires stdexec::__sender_for<Sender, stdexec::bulk_chunked_t>
+        requires exec::sender_for<Sender, stdexec::bulk_chunked_t>
     auto transform_sender(stdexec::set_value_t /*tag*/,
                           Sender&& sndr, // NOLINT(cppcoreguidelines-missing-std-forward)
                           Env const& /*env*/) const noexcept {

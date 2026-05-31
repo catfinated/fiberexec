@@ -366,12 +366,21 @@ Fans out 100 fibers blocked on `async_recv`; a trigger thread fires
 
 ## Housekeeping
 
-### Isolate `fiber_domain` stdexec internal header dependency
+### ~~Isolate `fiber_domain` stdexec internal header dependency~~ ✅ done
 
-`fiber_domain`'s `transform_sender` customization reaches into stdexec's
-internal headers. This will break silently on stdexec updates. The shim should
-be isolated behind a version-pinned boundary so breakage is contained and easy
-to repair.
+stdexec provides no public API for sender decomposition, so two layout
+assumptions in `fiber_domain::transform_sender` (structured bindings into the
+`bulk_chunked_t` sender and its data) are unavoidable. The risk is now
+contained:
+
+- stdexec is pinned to a specific commit in `cmake/Dependencies.cmake`.
+  Breakage on an stdexec update is a loud compile error at a clearly marked
+  site rather than a silent misbehaviour at runtime.
+- `stdexec::__sender_for` replaced with `exec::sender_for` from
+  `<exec/sender_for.hpp>` — the stdexec-blessed public replacement.
+- A `STDEXEC INTERNAL DEPENDENCY` comment block in `fiber_bulk.hpp` names the
+  pinned commit, documents each layout assumption and where it appears, and
+  tells a future maintainer exactly what to verify when advancing the pin.
 
 ### ~~README scope disclaimer~~ ✅ done
 

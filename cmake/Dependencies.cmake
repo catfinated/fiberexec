@@ -1,11 +1,16 @@
 include(FetchContent)
 
 # stdexec — P2300 reference implementation (not in vcpkg, header-only)
+#
+# Pinned to a specific commit because fiber_bulk.hpp customises the domain's
+# transform_sender using stdexec's internal sender decomposition layout (see
+# the STDEXEC INTERNAL DEPENDENCY block in that file).  Update the pin
+# deliberately after verifying the layout assumptions still hold.
 FetchContent_Declare(
   stdexec
   GIT_REPOSITORY https://github.com/NVIDIA/stdexec.git
-  GIT_TAG        main
-  GIT_SHALLOW    TRUE
+  GIT_TAG        02d671d  # 2026-05-31 — verified against fiber_bulk.hpp shim
+  GIT_SHALLOW    FALSE
 )
 set(STDEXEC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(STDEXEC_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
