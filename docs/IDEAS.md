@@ -125,10 +125,11 @@ through the submission queue to replenish the pool; `IORING_REGISTER_PBUF_RING`
 avoids this entirely by sharing the ring between kernel and userspace via a
 memory mapping.
 
-`io_uring_register_buffers` (`IORING_REGISTER_BUFFERS`) is a separate, still
-open feature: it pins arbitrary user buffers so the kernel can DMA directly
-without mapping them on each op. Useful for high-throughput send paths but not
-yet wired up.
+`io_uring_register_buffers` (`IORING_REGISTER_BUFFERS`) is implemented as
+`fiberexec::fixed_buffer_pool`. Buffers are pinned once at construction;
+`async_send_zc` references them by index via `IORING_OP_SEND_ZC` with
+`IORING_RECVSEND_FIXED_BUF`, eliminating the per-op memory pin/unpin on the
+send side. See ADR-0004.
 
 ### Fixed file descriptors (`io_uring_register_files`)
 
