@@ -148,12 +148,26 @@ The design and the decision to scope both `fixed_fd_table` and `fixed_buffer_poo
 as thread-local singletons (rather than fiber-scoped objects) are documented in
 ADR-0005.
 
-### Linked SQEs (`IOSQE_IO_LINK`)
+### ~~Linked SQEs (`IOSQE_IO_LINK`)~~ ✅ done
 
-Linked SQEs let you chain operations that the kernel executes sequentially
-without round-tripping through userspace. A `send` followed immediately by a
-`recv` could be submitted as a linked pair. Useful for request/response
-protocols where round-trip latency matters.
+Implemented as `detail::submit_linked_and_wait` in `src/fiber_context.cpp`, with
+two public-API entry points in `src/async_io.cpp`:
+
+- **`async_send_recv(fd, send_buf, recv_buf)`** — submits send + recv as a linked
+  pair on one fd; returns `std::pair<ssize_t, ssize_t>`. One `io_uring_submit`
+  call, one fiber suspension. Useful for request/response protocols (ping/pong,
+  HTTP/1.1 pipelining) where the round-trip through userspace would add latency.
+- **`async_write_fsync(fd, buf)`** — submits write + fsync as a linked pair;
+  returns the byte count of the write. The fsync starts the instant the write
+  completes without waiting for userspace to re-enter the ring.
+
+`submit_linked_and_wait` is generic: it accepts a `std::span<io_uring_sqe*>` of
+up to `k_max_linked_ops` (8) SQEs, sets `IOSQE_IO_LINK` on all but the last,
+submits them atomically, and suspends the calling fiber until all N CQEs arrive.
+Cancellation is fully supported: both the pool-wide and fiber-local stop tokens
+cancel all N awaitables (completed ones return `-ENOENT` and are silently
+discarded; the in-flight one is cancelled and the kernel cascades `-ECANCELED`
+to subsequent linked SQEs). See `tests/test_linked.cpp` for the test suite.
 
 ---
 

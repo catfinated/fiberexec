@@ -9,6 +9,7 @@ add_executable(fiberexec_tests
   test_bulk.cpp
   test_channel.cpp
   test_task.cpp
+  test_linked.cpp
 )
 
 target_link_libraries(fiberexec_tests

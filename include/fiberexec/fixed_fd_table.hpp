@@ -1,28 +1,13 @@
 #pragma once
 
 #include <fiberexec/channel.hpp>
+#include <fiberexec/fd_ref.hpp>
 
-#include <chrono>
 #include <cstddef>
-#include <optional>
-#include <span>
-#include <sys/socket.h>
-#include <sys/types.h>
 
 struct io_uring;
 
 namespace fiberexec {
-
-/// Opaque handle for a slot in a fixed_fd_table.
-///
-/// Obtain one from `acquire_fd_slot()` (preferred) or from
-/// `fixed_fd_table::operator[]` for direct index access.  Pass to the
-/// fixed-fd overloads of async_recv / async_send / async_read / async_write /
-/// async_connect; the kernel dispatches these ops without a per-op fd table
-/// lookup.
-struct fixed_fd {
-    int index;
-};
 
 class fd_slot; // forward declaration — defined below
 
@@ -96,11 +81,12 @@ public:
     /// @throws std::system_error on io_uring update failure.
     void update(int fd);
 
-    /// Implicit conversion so `fd_slot` can be passed directly to the
-    /// async_recv / async_send / async_read / async_write / async_connect
-    /// overloads that take `fixed_fd`.
+    /// Implicit conversions so `fd_slot` can be passed directly to any async op.
     [[nodiscard]] operator fixed_fd() const noexcept {
         return fixed_fd{static_cast<int>(slot_)};
+    } // NOLINT(google-explicit-constructor)
+    [[nodiscard]] operator fd_ref() const noexcept {
+        return fd_ref{fixed_fd{static_cast<int>(slot_)}};
     } // NOLINT(google-explicit-constructor)
 
     ~fd_slot();
@@ -130,31 +116,5 @@ private:
 ///
 /// @throws std::runtime_error if no registered-fd table was configured for this thread.
 [[nodiscard]] fd_slot acquire_fd_slot(int fd);
-
-// ---------------------------------------------------------------------------
-// async ops on fixed fds (set IOSQE_FIXED_FILE, skipping fd table lookup)
-// ---------------------------------------------------------------------------
-
-ssize_t async_recv(fixed_fd fd,
-                   std::span<std::byte> buf,
-                   int flags = 0,
-                   std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
-
-ssize_t async_send(fixed_fd fd,
-                   std::span<std::byte const> buf,
-                   int flags = 0,
-                   std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
-
-ssize_t
-async_read(fixed_fd fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
-
-ssize_t async_write(fixed_fd fd,
-                    std::span<std::byte const> buf,
-                    std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
-
-void async_connect(fixed_fd fd,
-                   sockaddr const* addr,
-                   socklen_t addrlen,
-                   std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
 
 } // namespace fiberexec

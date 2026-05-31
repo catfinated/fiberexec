@@ -1,11 +1,8 @@
-#include <fiberexec/detail/async_helpers.hpp>
+#include <fiberexec/detail/fiber_ops.hpp>
 #include <fiberexec/fixed_fd_table.hpp>
 
 #include <liburing.h>
 
-#include <chrono>
-#include <optional>
-#include <span>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
@@ -111,70 +108,6 @@ fd_slot acquire_fd_slot(int fd) {
     unsigned slot = tbl->borrow_slot();
     tbl->update(slot, fd);
     return fd_slot{tbl, slot};
-}
-
-// ---------------------------------------------------------------------------
-// async ops on fixed fds
-// ---------------------------------------------------------------------------
-
-ssize_t async_recv(fixed_fd fd, std::span<std::byte> buf, int flags, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_recv(fixed_fd)"));
-    io_uring_prep_recv(sqe, fd.index, buf.data(), buf.size(), flags);
-    sqe->flags |= IOSQE_FIXED_FILE;
-    int const res = detail::dispatch(sqe, timeout);
-    if (res < 0) {
-        throw std::system_error(-res, std::system_category(), "async_recv(fixed_fd)");
-    }
-    return static_cast<ssize_t>(res);
-}
-
-ssize_t
-async_send(fixed_fd fd, std::span<std::byte const> buf, int flags, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_send(fixed_fd)"));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    io_uring_prep_send(sqe, fd.index, const_cast<void*>(static_cast<void const*>(buf.data())), buf.size(), flags);
-    sqe->flags |= IOSQE_FIXED_FILE;
-    int const res = detail::dispatch(sqe, timeout);
-    if (res < 0) {
-        throw std::system_error(-res, std::system_category(), "async_send(fixed_fd)");
-    }
-    return static_cast<ssize_t>(res);
-}
-
-ssize_t async_read(fixed_fd fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_read(fixed_fd)"));
-    io_uring_prep_read(sqe, fd.index, buf.data(), static_cast<unsigned>(buf.size()), 0);
-    sqe->flags |= IOSQE_FIXED_FILE;
-    int const res = detail::dispatch(sqe, timeout);
-    if (res < 0) {
-        throw std::system_error(-res, std::system_category(), "async_read(fixed_fd)");
-    }
-    return static_cast<ssize_t>(res);
-}
-
-ssize_t async_write(fixed_fd fd, std::span<std::byte const> buf, std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_write(fixed_fd)"));
-    io_uring_prep_write(sqe, fd.index, buf.data(), static_cast<unsigned>(buf.size()), 0);
-    sqe->flags |= IOSQE_FIXED_FILE;
-    int const res = detail::dispatch(sqe, timeout);
-    if (res < 0) {
-        throw std::system_error(-res, std::system_category(), "async_write(fixed_fd)");
-    }
-    return static_cast<ssize_t>(res);
-}
-
-void async_connect(fixed_fd fd,
-                   sockaddr const* addr,
-                   socklen_t addrlen,
-                   std::optional<std::chrono::nanoseconds> timeout) {
-    io_uring_sqe* sqe = io_uring_get_sqe(detail::begin_async_op("async_connect(fixed_fd)"));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    io_uring_prep_connect(sqe, fd.index, const_cast<sockaddr*>(addr), addrlen);
-    sqe->flags |= IOSQE_FIXED_FILE;
-    int const res = detail::dispatch(sqe, timeout);
-    if (res < 0) {
-        throw std::system_error(-res, std::system_category(), "async_connect(fixed_fd)");
-    }
 }
 
 } // namespace fiberexec

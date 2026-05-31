@@ -3,6 +3,7 @@
 #include <fiberexec/task.hpp>
 
 #include <chrono>
+#include <span>
 #include <stop_token>
 
 // Forward-declare liburing types so includers don't need to pull in <liburing.h>.
@@ -64,6 +65,24 @@ void submit_cancel(void* handler) noexcept;
 /// Return the fixed_fd_table for the current worker thread, or nullptr if no
 /// table was configured (context_options::registered_fd_capacity was 0).
 [[nodiscard]] fixed_fd_table* current_fd_table() noexcept;
+
+/// Maximum number of SQEs in a linked chain passed to submit_linked_and_wait.
+inline constexpr std::size_t k_max_linked_ops = 8;
+
+/// Submit @p sqes.size() SQEs as a linked chain — IOSQE_IO_LINK is set on
+/// every SQE except the last — in a single io_uring_submit call, then suspend
+/// the calling fiber until every CQE has arrived.  @p out[i] receives the CQE
+/// result for @p sqes[i] (negative errno on I/O failure).
+///
+/// sqes.size() must equal out.size() and be in [1, k_max_linked_ops].
+/// Must be called from a fiber running on a fiberexec worker.
+///
+/// Cancellation is automatic: if either the fiber-local or the pool-wide stop
+/// token fires while the fiber is suspended, IORING_OP_ASYNC_CANCEL is
+/// submitted for every awaitable in the chain.  CQEs for already-completed ops
+/// return -ENOENT (silently discarded); the in-flight op returns -ECANCELED and
+/// the kernel cascades -ECANCELED to any subsequent linked SQEs.
+void submit_linked_and_wait(std::span<io_uring_sqe*> sqes, std::span<int> out);
 
 } // namespace detail
 

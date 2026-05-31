@@ -1,5 +1,7 @@
 #pragma once
 
+#include <fiberexec/fd_ref.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <optional>
@@ -24,7 +26,7 @@ namespace fiberexec {
 /// @returns Number of bytes read.
 /// @throws std::system_error on I/O failure, timeout, or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_read(int fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
+ssize_t async_read(fd_ref fd, std::span<std::byte> buf, std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
 
 /// Asynchronously write @p buf to @p fd.
 ///
@@ -39,7 +41,7 @@ ssize_t async_read(int fd, std::span<std::byte> buf, std::optional<std::chrono::
 /// @throws std::system_error on I/O failure, timeout, or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
 ssize_t
-async_write(int fd, std::span<std::byte const> buf, std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
+async_write(fd_ref fd, std::span<std::byte const> buf, std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
 
 /// Accept an incoming connection on @p fd.
 ///
@@ -101,7 +103,7 @@ void async_close(int fd);
 ///
 /// @throws std::system_error on I/O failure, timeout, or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-void async_connect(int fd,
+void async_connect(fd_ref fd,
                    sockaddr const* addr,
                    socklen_t addrlen,
                    std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
@@ -119,7 +121,7 @@ void async_connect(int fd,
 /// @returns Number of bytes received.
 /// @throws std::system_error on I/O failure, timeout, or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_recv(int fd,
+ssize_t async_recv(fd_ref fd,
                    std::span<std::byte> buf,
                    int flags = 0,
                    std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
@@ -137,10 +139,36 @@ ssize_t async_recv(int fd,
 /// @returns Number of bytes sent.
 /// @throws std::system_error on I/O failure, timeout, or cancellation.
 /// @throws std::runtime_error if called outside of a fiberexec fiber.
-ssize_t async_send(int fd,
+ssize_t async_send(fd_ref fd,
                    std::span<std::byte const> buf,
                    int flags = 0,
                    std::optional<std::chrono::nanoseconds> timeout = std::nullopt);
+
+/// Submit send + recv on @p fd as a linked pair in a single io_uring_submit
+/// call.  The kernel starts the recv immediately after the send completes
+/// without waiting for userspace to re-enter.  The calling fiber suspends
+/// once and resumes when both CQEs have arrived.
+///
+/// @p send_flags and @p recv_flags are passed through to the underlying ops.
+///
+/// @returns {bytes_sent, bytes_received}.
+/// @throws std::system_error if either op fails (send error checked first).
+/// @throws std::runtime_error if called outside of a fiberexec fiber.
+std::pair<ssize_t, ssize_t> async_send_recv(fd_ref fd,
+                                            std::span<std::byte const> send_buf,
+                                            std::span<std::byte> recv_buf,
+                                            int send_flags = 0,
+                                            int recv_flags = 0);
+
+/// Submit write + fsync on @p fd as a linked pair in a single io_uring_submit
+/// call.  The kernel starts the fsync immediately after the write completes
+/// without waiting for userspace to re-enter.  The calling fiber suspends
+/// once and resumes when both CQEs have arrived.
+///
+/// @returns Number of bytes written.
+/// @throws std::system_error if either op fails (write error checked first).
+/// @throws std::runtime_error if called outside of a fiberexec fiber.
+ssize_t async_write_fsync(fd_ref fd, std::span<std::byte const> buf);
 
 /// Suspend the calling fiber for at least @p duration.
 ///

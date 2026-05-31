@@ -9,11 +9,13 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <queue>
+#include <span>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -408,6 +410,75 @@ int submit_and_wait_with_timeout(io_uring_sqe* sqe, std::chrono::nanoseconds tim
         return future.get();
     }
     return future.get();
+}
+
+void submit_linked_and_wait(std::span<io_uring_sqe*> sqes, std::span<int> out) {
+    std::size_t const n = sqes.size();
+    if (n == 0 || n > k_max_linked_ops || n != out.size()) {
+        throw std::invalid_argument("submit_linked_and_wait: chain length must be in [1, k_max_linked_ops]");
+    }
+
+    // Stack-allocate one awaitable per SQE. Boost.Fiber preserves the calling
+    // fiber's stack while it is suspended, so these remain valid until all
+    // CQEs arrive.  Unused array slots (indices n..k_max_linked_ops-1) are
+    // default-constructed but never given a future; promise shared-state is
+    // allocated lazily in get_future(), so they cost nothing here.
+    std::array<io_awaitable, k_max_linked_ops> aws;
+    std::array<boost::fibers::future<int>, k_max_linked_ops> futs;
+    // Pre-capture awaitable addresses for the stop callbacks. Stored as void*
+    // in a value-copyable array so the lambda owns stable pointers independent
+    // of the aws array's stack lifetime (though both live equally long here).
+    std::array<void*, k_max_linked_ops> cancel_targets{};
+
+    // Wire each SQE to its awaitable. A plain size_t counter alongside
+    // range-for over the span keeps array access through .at() (bounds-checked).
+    {
+        std::size_t i = 0;
+        for (io_uring_sqe* sqe : sqes.subspan(0, n)) {
+            io_awaitable& aw = aws.at(i);
+            futs.at(i) = aw.promise.get_future();
+            io_uring_sqe_set_data(sqe, static_cast<cqe_handler*>(&aw));
+            cancel_targets.at(i) = static_cast<cqe_handler*>(&aw);
+            ++i;
+        }
+    }
+    // Set IOSQE_IO_LINK on every SQE except the last.
+    for (io_uring_sqe* sqe : sqes.subspan(0, n - 1)) {
+        sqe->flags |= IOSQE_IO_LINK;
+    }
+
+    if (int ret = io_uring_submit(tl_ring); ret < 0) {
+        throw std::system_error(-ret, std::system_category(), "io_uring_submit (linked chain)");
+    }
+
+    // Cancel all N awaitables on stop. Only the in-flight one will succeed;
+    // completed ones return -ENOENT (silently discarded by drain_cqes). The
+    // kernel then cascades -ECANCELED to any not-yet-started linked SQEs.
+    // cancel_targets is captured by value so it is valid inside the callback
+    // regardless of what the fiber's stack looks like when it fires.
+    auto* sched = tl_scheduler;
+    auto const cancel = [sched, cancel_targets, n]() noexcept {
+        for (std::size_t j = 0; j < n; ++j) {
+            sched->request_cancel(cancel_targets.at(j));
+        }
+    };
+    // Collect all results. The stop callbacks must stay alive for the entire
+    // wait, not just one future, so we keep them in scope around wait_all().
+    auto const wait_all = [&] {
+        std::size_t i = 0;
+        for (int& result : out.subspan(0, n)) {
+            result = futs.at(i).get();
+            ++i;
+        }
+    };
+    std::stop_callback pool_cb{sched->pool_stop_token(), cancel};
+    auto fiber_st = current_fiber_stop_token();
+    if (fiber_st.stop_possible()) {
+        std::stop_callback fiber_cb{std::move(fiber_st), cancel};
+        wait_all();
+    } else {
+        wait_all();
+    }
 }
 
 void submit_cancel(void* handler) noexcept {
