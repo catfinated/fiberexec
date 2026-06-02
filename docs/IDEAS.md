@@ -62,6 +62,36 @@ demonstrate that pika's fibers are tuned for compute rather than I/O. It turns
 the "but pika exists" question into a supporting data point and directly answers
 "why does this exist when pika exists?" with numbers.
 
+**Update**: a head-to-head echo throughput benchmark was implemented 
+out of band. Short version: fiberexec wins at high
+concurrency (643 k vs 479 k round-trips/s at 1000 connections), but the
+comparison is not as clean as originally framed.
+
+The core problem is that pika has **no async I/O layer** — connection handlers
+use blocking `::recv`/`::send`, so every in-flight connection occupies a pool OS
+thread. fiberexec wins because io_uring multiplexes all connections
+concurrently regardless of pool size, not because of anything specific to its
+scheduler or P2300 integration. The result is predetermined: any async I/O
+runtime beats blocking I/O at scale. This makes the benchmark more of an
+illustration of *why async I/O exists* than a scheduler comparison.
+
+A few additional nuances from the results:
+- At 100 connections, **thread-per-connection beats both** (628 k/s vs fiberexec
+  596 k, pika 461 k). Pika's work-stealing task dispatch adds overhead on top of
+  blocking I/O that raw OS threads don't pay.
+- fiberexec's throughput *increases* from 100 → 1000 connections (io_uring
+  batches more CQEs per wakeup with higher fan-out). Pika plateaus once the pool
+  is saturated.
+- For **CPU-bound bulk work** the comparison would flip. Pika's
+  `thread_pool_scheduler::bulk` has carefully tuned work-stealing, chunk sizing,
+  and NUMA-aware placement that fiberexec's fiber-based bulk does not attempt.
+  fiberexec's bulk advantage is specific to workloads where invocations do async
+  I/O and yield.
+
+The more meaningful comparison for fiberexec's scheduler and P2300 integration
+is Asio (already in `benchmarks/bench_echo.cpp`) — both target async I/O, both
+have P2300 wrappers, and the results there are not predetermined.
+
 ---
 
 ## io_uring features
@@ -168,6 +198,65 @@ Cancellation is fully supported: both the pool-wide and fiber-local stop tokens
 cancel all N awaitables (completed ones return `-ENOENT` and are silently
 discarded; the in-flight one is cancelled and the kernel cascades `-ECANCELED`
 to subsequent linked SQEs). See `tests/test_linked.cpp` for the test suite.
+
+### `IORING_OP_MSG_RING` — replace eventfd inter-thread wakeup
+
+Each fiber context currently uses an eventfd to wake the io_uring event loop on a
+different thread (e.g. when a channel push unblocks a waiting fiber on another
+thread).  `IORING_OP_MSG_RING` posts a CQE directly into another ring without a
+round-trip through the kernel's fd table — no `write(eventfd)` syscall, no
+`read(eventfd)` SQE on the receiving side.  Replacing the eventfd wakeup path
+with `MSG_RING` removes two syscalls per cross-thread notification.
+
+### `IORING_SETUP_DEFER_TASKRUN` / `IORING_SETUP_COOP_TASKRUN`
+
+By default the kernel may deliver task_work (CQE completions) to the application
+thread at any point, including inside unrelated syscalls.  `COOP_TASKRUN`
+suppresses involuntary delivery; `DEFER_TASKRUN` (kernel 6.1+) goes further and
+defers all task_work until the application explicitly calls into io_uring.
+Together these reduce context switches and can lower tail latency.  Low
+implementation cost — ring setup flags only.
+
+### `IORING_SETUP_SQPOLL`
+
+A kernel thread polls the submission ring continuously, eliminating the
+`io_uring_submit` syscall on the hot path entirely.  At very high submission
+rates this removes measurable overhead.  Trade-off: the kernel thread spins,
+burning a CPU even during idle periods.  Should be opt-in via a `context`
+constructor flag rather than the default.  Requires `CAP_SYS_NICE` on older
+kernels (relaxed in later versions).
+
+### `IORING_OP_SPLICE` — zero-copy fd-to-fd transfer
+
+`splice(2)` moves data between two file descriptors through the kernel page cache
+without copying to userspace.  io_uring exposes this as `IORING_OP_SPLICE`.
+Useful for proxy workloads (pipe accepted socket data to an upstream fd) and file
+serving (splice a file fd directly to a socket).  No equivalent exists in the
+current API; adding `async_splice(fd_in, fd_out, nbytes)` would cover these cases.
+
+### `IORING_OP_ACCEPT_DIRECT` / `IORING_OP_OPENAT_DIRECT`
+
+Accept a connection or open a file directly into a slot in the registered fd
+table, skipping the `io_uring_register_files_update` call that currently follows
+every `async_accept` / `async_openat` when fixed fds are needed.  io_uring
+supports this natively; the gap is on the fiberexec side — the fixed-fd free-list
+design would need to reserve a slot before the op and commit it on completion.
+Noted in ADR-0006 as a known limitation of the current table design.
+
+### `IORING_OP_FUTEX_WAIT` / `IORING_OP_FUTEX_WAKE`
+
+Async futex operations available since kernel 6.7.  Speculative: could serve as
+a lower-level building block for fiber synchronization primitives (channel, mutex)
+that suspend in io_uring rather than in Boost.Fiber's scheduler, avoiding a
+fiber context switch on the unblocking side.  Worth prototyping once the kernel
+version is common enough.
+
+### `IORING_OP_SOCKET`
+
+Create a socket via io_uring rather than a plain `socket(2)` syscall.  On its own
+the benefit is modest, but it enables chaining with `IORING_OP_CONNECT` via
+linked SQEs — socket creation + connect in one submission, with the result landing
+directly in the fixed fd table via the `_DIRECT` variant.
 
 ---
 
