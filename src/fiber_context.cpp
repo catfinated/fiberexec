@@ -145,7 +145,22 @@ public:
         if (notify_fd_ < 0) {
             throw std::system_error(errno, std::system_category(), "eventfd (notify)");
         }
-        if (int ret = io_uring_queue_init(k_ring_entries, &ring_, 0); ret < 0) {
+        // Prefer the three-flag combination (kernel 6.1+):
+        //   SINGLE_ISSUER   — only this thread submits; allows internal kernel optimisations
+        //                     and is required by DEFER_TASKRUN.
+        //   COOP_TASKRUN    — suppress involuntary task_work delivery; completions are
+        //                     processed cooperatively when the thread calls into io_uring.
+        //   DEFER_TASKRUN   — further defer task_work until io_uring_enter is called with
+        //                     IORING_ENTER_GETEVENTS (i.e. io_uring_wait_cqe*), reducing
+        //                     context switches on the completion path.
+        // Fall back to plain init on kernels that pre-date these flags.
+        io_uring_params params{};
+        params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_DEFER_TASKRUN;
+        int ret = io_uring_queue_init_params(k_ring_entries, &ring_, &params);
+        if (ret == -EINVAL) {
+            ret = io_uring_queue_init(k_ring_entries, &ring_, 0);
+        }
+        if (ret < 0) {
             throw std::system_error(-ret, std::system_category(), "io_uring_queue_init");
         }
         tl_ring = &ring_;
