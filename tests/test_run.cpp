@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 
 TEST_CASE("run executes a void callable and sends set_value", "[run]") {
     fiberexec::context ctx{2};
@@ -184,4 +186,48 @@ TEST_CASE("pipe run maps async_read cancellation to set_stopped", "[run][pipe][c
     ::close(write_fd);
 
     REQUIRE(auto_cancelled);
+}
+
+// ---------------------------------------------------------------------------
+// Pipe form accepts only a fiberexec schedule sender
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct noop_fn {
+    void operator()() const {}
+};
+
+// Models "upstream | fiberexec::run(fn) compiles".
+template <class Upstream>
+concept pipeable_into_run = requires(Upstream up, noop_fn fn) { std::move(up) | fiberexec::run(fn); };
+
+} // namespace
+
+TEST_CASE("pipe run rejects senders other than schedule", "[run][pipe]") {
+    fiberexec::context ctx{2};
+    auto sched = ctx.get_scheduler();
+
+    using schedule_t = decltype(stdexec::schedule(sched));
+
+    // Positive control: without this the negative checks below could pass
+    // vacuously (e.g. if run(fn) stopped being pipeable at all).
+    STATIC_REQUIRE(pipeable_into_run<schedule_t>);
+
+    // fn must run on a fiber for async_read/async_write to work, which is only
+    // true directly downstream of a fiberexec schedule.  Piping run(fn) after a
+    // sender that completes on some other thread would silently run fn
+    // off-fiber, so it does not compile.
+    STATIC_REQUIRE_FALSE(pipeable_into_run<decltype(stdexec::just())>);
+    STATIC_REQUIRE_FALSE(pipeable_into_run<decltype(stdexec::just(42))>);
+
+    // Known limitation: an adapted schedule sender still completes on the
+    // fiber, but is no longer a schedule_sender, so it is rejected too.  A
+    // future generic pipe form would relax this case (and only this case).
+    STATIC_REQUIRE_FALSE(pipeable_into_run<decltype(stdexec::then(stdexec::schedule(sched), noop_fn{}))>);
+
+    // The pipe form is the direct form: same sender type, not merely the same
+    // semantics.
+    STATIC_REQUIRE(std::is_same_v<decltype(stdexec::schedule(sched) | fiberexec::run(noop_fn{})),
+                                  decltype(fiberexec::run(sched, noop_fn{}))>);
 }

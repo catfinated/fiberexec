@@ -117,116 +117,21 @@ template <class Fn> struct run_sender {
 // Pipe form: schedule(sched) | run(fn)
 // ---------------------------------------------------------------------------
 
-// run_pipe_sender wraps an upstream sender. When the upstream sends
-// set_value, it installs the fiber-local stop token and runs Fn, mapping
-// ECANCELED -> set_stopped. set_error and set_stopped from upstream are
-// forwarded unchanged.
-template <class Upstream, class Fn> struct run_pipe_sender {
-    using sender_concept = stdexec::sender_tag;
-    using result_t = std::invoke_result_t<Fn>;
-    using completion_signatures = run_completion_signatures<result_t>::type;
-
-    template <stdexec::receiver Receiver> struct operation {
-        using operation_state_concept = stdexec::operation_state_tag;
-        using stop_token_t = stdexec::stop_token_of_t<stdexec::env_of_t<Receiver>>;
-
-        struct stop_forwarder {
-            std::stop_source* src{nullptr};
-            void operator()() const noexcept { src->request_stop(); }
-        };
-        using stop_cb_t = stdexec::stop_callback_for_t<stop_token_t, stop_forwarder>;
-
-        // inner_receiver is what the upstream (schedule) delivers set_value to.
-        // It holds a pointer back to the parent operation, which is safe because
-        // the operation is pinned after connect() returns (mandatory copy elision).
-        struct inner_receiver {
-            using receiver_concept = stdexec::receiver_tag;
-            operation* op{nullptr};
-
-            [[nodiscard]] stdexec::env_of_t<Receiver> get_env() const noexcept { return stdexec::get_env(op->rcvr); }
-
-            // Accept (and discard) any upstream value args — schedule sends none,
-            // but this lets run(fn) compose after other senders too.
-            template <class... Args> void set_value(Args&&... /*args*/) noexcept {
-                install_fiber_stop_token(op->fiber_stop_.get_token());
-                try {
-                    if constexpr (std::is_void_v<result_t>) {
-                        std::move(op->fn)();
-                        stdexec::set_value(std::move(op->rcvr));
-                    } else {
-                        auto val = std::move(op->fn)();
-                        stdexec::set_value(std::move(op->rcvr), std::move(val));
-                    }
-                } catch (boost::context::detail::forced_unwind const&) {
-                    stdexec::set_stopped(std::move(op->rcvr));
-                    throw; // Boost.Fiber stack-unwinding; must propagate after completing
-                } catch (std::system_error const& e) {
-                    if (e.code().value() == ECANCELED) {
-                        stdexec::set_stopped(std::move(op->rcvr));
-                    } else {
-                        stdexec::set_error(std::move(op->rcvr), std::current_exception());
-                    }
-                } catch (...) {
-                    stdexec::set_error(std::move(op->rcvr), std::current_exception());
-                }
-            }
-
-            template <class E> void set_error(E&& e) noexcept {
-                stdexec::set_error(std::move(op->rcvr), std::forward<E>(e));
-            }
-
-            void set_stopped() noexcept { stdexec::set_stopped(std::move(op->rcvr)); }
-        };
-
-        // upstream_op_ must be declared last: its constructor calls
-        // stdexec::connect(upstream, inner_receiver{this}), so rcvr, fn,
-        // fiber_stop_, and stop_cb_ must already be initialized at that point.
-        Receiver rcvr;
-        Fn fn;
-        std::stop_source fiber_stop_{std::nostopstate};
-        std::optional<stop_cb_t> stop_cb_;
-        stdexec::connect_result_t<Upstream, inner_receiver> upstream_op_;
-
-        explicit operation(Upstream upstream, Receiver rcvr_, Fn fn_)
-            : rcvr(std::move(rcvr_))
-            , fn(std::move(fn_))
-            , upstream_op_(stdexec::connect(std::move(upstream), inner_receiver{this})) {}
-
-        void start() noexcept {
-            auto env_tok = stdexec::get_stop_token(stdexec::get_env(rcvr));
-            if (env_tok.stop_possible()) {
-                fiber_stop_ = std::stop_source{};
-                stop_cb_.emplace(env_tok, stop_forwarder{&fiber_stop_});
-            }
-            stdexec::start(upstream_op_);
-        }
-    };
-
-    template <stdexec::receiver Receiver> [[nodiscard]] auto connect(Receiver rcvr) && -> operation<Receiver> {
-        return operation<Receiver>{std::move(upstream_), std::move(rcvr), std::move(fn_)};
+// run_closure is the sender adaptor closure returned by the one-arg run(fn).
+// Piping a schedule_sender into it rebuilds the two-arg run_sender from the
+// upstream sender's context, so the pipe form *is* the direct form: one fiber,
+// one stop-token bridge, and a single definition of the completion mapping.
+//
+// Only schedule_sender is accepted.  fn must run on a fiber for async_read,
+// async_write, etc. to work, which is only true downstream of a fiberexec
+// schedule; piping run(fn) after an arbitrary sender would silently run fn
+// off-fiber, so it is a compile error instead.
+template <class Fn> struct run_closure : stdexec::sender_adaptor_closure<run_closure<Fn>> {
+    [[nodiscard]] auto operator()(scheduler::schedule_sender sndr) && -> run_sender<Fn> {
+        return {sndr.ctx, std::move(fn_)};
     }
 
-    template <stdexec::receiver Receiver> [[nodiscard]] auto connect(Receiver rcvr) const& -> operation<Receiver> {
-        return operation<Receiver>{upstream_, std::move(rcvr), fn_};
-    }
-
-    Upstream upstream_;
-    Fn fn_;
-};
-
-// run_closure is the SAC returned by the one-arg run(fn). operator| connects
-// it to an upstream sender to produce a run_pipe_sender.
-template <class Fn> struct run_closure {
-    template <stdexec::sender Upstream>
-    friend auto operator|(Upstream&& upstream, run_closure&& closure) -> run_pipe_sender<std::decay_t<Upstream>, Fn> {
-        return {std::forward<Upstream>(upstream), std::move(closure).fn_};
-    }
-
-    template <stdexec::sender Upstream>
-    friend auto operator|(Upstream&& upstream, run_closure const& closure)
-        -> run_pipe_sender<std::decay_t<Upstream>, Fn> {
-        return {std::forward<Upstream>(upstream), closure.fn_};
-    }
+    [[nodiscard]] auto operator()(scheduler::schedule_sender sndr) const& -> run_sender<Fn> { return {sndr.ctx, fn_}; }
 
     Fn fn_;
 };
@@ -265,18 +170,19 @@ template <class Fn> [[nodiscard]] auto run(scheduler sched, Fn&& fn) {
 ///
 /// Usage: `stdexec::schedule(sched) | fiberexec::run(fn)`
 ///
-/// This has identical semantics to `fiberexec::run(sched, fn)`: the stop-token
-/// bridge is installed before @p fn runs, and ECANCELED is mapped to
-/// `set_stopped`. The scheduler is provided by the upstream sender rather than
-/// as a direct argument.
+/// This is identical to `fiberexec::run(sched, fn)` by construction: the
+/// closure takes the context out of the upstream `schedule_sender` and returns
+/// the very same sender the two-arg form returns. The upstream must be a
+/// `fiberexec` schedule sender; piping after any other sender is a compile
+/// error, since @p fn would not be running on a fiber.
 ///
 /// @tparam Fn  Callable with signature `R()`. May return void.
 /// @param fn   Callable to invoke on the fiber.
 ///
-/// @returns A closure that, when piped after a sender, produces a sender with
-///   the same completion signatures as `fiberexec::run(sched, fn)`.
+/// @returns A closure that, when piped after `stdexec::schedule(sched)`,
+///   produces exactly `fiberexec::run(sched, fn)`.
 template <class Fn> [[nodiscard]] auto run(Fn&& fn) {
-    return detail::run_closure<std::decay_t<Fn>>{std::forward<Fn>(fn)};
+    return detail::run_closure<std::decay_t<Fn>>{{}, std::forward<Fn>(fn)};
 }
 
 } // namespace fiberexec
