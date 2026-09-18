@@ -7,6 +7,7 @@ io_uring async I/O with fiber ergonomics and P2300 structured concurrency.
 - [What is this?](#what-is-this)
 - [Background](#background)
   - [Fibers vs threads](#fibers-vs-threads)
+  - [Fibers vs Coroutines](#fibers-vs-coroutines)
   - [std::execution (P2300)](#stdexecution-p2300)
   - [Why I/O matters here](#why-io-matters-here)
 - [Features](#features)
@@ -56,6 +57,18 @@ Fibers are cooperatively scheduled in userspace. A fiber only yields when it exp
 
 By running fibers on a thread pool, you get both: lightweight cooperative scheduling within each thread, and real parallelism across threads. fiberexec uses a custom per-thread Boost.Fiber scheduling algorithm backed by io_uring, so the scheduler itself never blocks on a condition variable — it sleeps directly in `io_uring_wait_cqe` and wakes only when I/O completes or new work arrives.
 
+### Fibers vs Coroutines
+
+C++20 added coroutines to the *language* and almost nothing to the *library*. The language half is complete: `co_await`, `co_yield`, `co_return`, the `promise_type` customization point, the awaiter protocol, and `std::coroutine_handle`. The library half was empty — no task type, no generator until C++23, no scheduler to resume frames on, no `sync_wait` or `when_all`. What shipped was a set of hooks for library authors to build coroutine types with, so every project wrote its own or adopted someone else's: cppcoro, libunifex, Asio's `awaitable<T>`, now `stdexec::task<T>`. `std::execution` in C++26 is the first time the standard library supplies the other half. Fibers needed no language support at all — Boost.Context switches stacks in a few dozen lines of per-architecture assembly, and Boost.Fiber had a scheduler, mutex, condition variable, and channel built on it years before coroutines were voted in.
+
+**Allocation: stacks vs frames.** A fiber owns a real contiguous machine stack, allocated in full at creation — 128KB by default in fiberexec (`fiberexec::default_stack_size`), fixed-size, so it never grows — and that one stack holds the fiber's entire call tree. A coroutine allocates per *frame*: one heap allocation sized precisely for that coroutine's parameters and the locals that survive a suspend point, typically tens to a few hundred bytes, elided entirely (HALO) when the frame's lifetime nests inside the caller's, and nothing reserved for callees. So fibers both over- and under-provision — you pay 128KB whether the deepest call needs 200 bytes or 100KB, and exceeding it is a stack overflow with no way to grow — while coroutines pay a small exact cost once per coroutine in the chain. At a million concurrent tasks that is 128GB of stacks against a few hundred megabytes of frames.
+
+**Function coloring.** `co_await` is only legal inside a coroutine, so "is this async?" becomes part of a function's type and propagates: to await something you must be a coroutine, which forces your caller to be one too, all the way up. That is Bob Nystrom's ["What Color is Your Function?"](https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/), and C++ has it in full — you cannot teach a deeply nested helper to do I/O without recoloring every frame above it. Not everyone is a fan, and fibers are the other answer: suspension is a property of the stack rather than the signature, so a leaf function three layers down can block on I/O without any of its callers knowing.
+
+**Why coroutines were standardized anyway.** The reasons are mostly the mirror image. The compiler computes the frame, so there is no stack to size and no overflow cliff. A stackless coroutine is a compiler transform rather than assembly, so it works on every target and preserves the one-stack-per-thread assumption that debuggers, unwinders, and sanitizers are built on — fibers violate it and have to teach each of those tools otherwise. Each coroutine type declares its own semantics and the compiler enforces them, where a fiber is untyped. And coloring is a feature to its proponents: every `co_await` marks a visible suspension point, while a fiber can yield inside any callee, including one you did not write. No fiber proposal was ready either — [P0876 (`fiber_context`)](https://wg21.link/p0876) has been in flight for years and still has not landed.
+
+fiberexec takes the complementary bet. It uses the library half coroutines finally got — `std::execution` — as the outer composition layer, where senders supply structure, typed completions, and cancellation, and puts stackful fibers underneath as the local execution substrate, where code is uncolored and sequential.
+
 ### std::execution (P2300)
 
 `std::execution` is the async programming model accepted into C++26. Its core abstractions are:
@@ -68,7 +81,7 @@ You compose senders with algorithms like `then`, `when_all`, `let_value`, and `s
 
 The key insight is that `std::execution` is deliberately agnostic about what the execution context actually is. A scheduler just needs to provide a `schedule()` function that returns a sender. That sender, when started, transitions to the scheduler's context and completes. Everything else composes on top. This means plugging in a fiber pool as the execution context is a natural fit — and that's exactly what fiberexec does.
 
-`std::execution` also integrates directly with C++20 stackless coroutines. stdexec ships `stdexec::task<T>`, a coroutine type that is itself a sender. You can `co_await` any sender from inside a task, and the task itself composes into any sender pipeline. This gives sender/receiver the sequential ergonomics of coroutines without a separate runtime: the coroutine suspends at each `co_await` and the scheduler decides when to resume it. Stackless coroutines are zero-cost at the language level (no heap allocation beyond the initial frame, no dynamic dispatch), but carry a different tradeoff from fibers. Each coroutine type must be explicitly declared, the stack depth is bounded at compile time, and `co_await`-ing a blocking call suspends only the coroutine frame, not the OS thread. fiberexec takes the complementary bet: stackful fibers that can call any blocking-looking API anywhere in the call tree, at the cost of a per-fiber stack allocation and a context switch on every yield.
+`std::execution` also integrates directly with C++20 stackless coroutines. stdexec ships `stdexec::task<T>`, a coroutine type that is itself a sender. You can `co_await` any sender from inside a task, and the task itself composes into any sender pipeline. This gives sender/receiver the sequential ergonomics of coroutines without a separate runtime: the coroutine suspends at each `co_await` and the scheduler decides when to resume it. See [Fibers vs Coroutines](#fibers-vs-coroutines) for how that model compares to the stackful one fiberexec is built on.
 
 ### Why I/O matters here
 
